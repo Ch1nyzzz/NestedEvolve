@@ -35,6 +35,7 @@ class NOptimizer:
         *,
         max_iterations: int = 5,
         n_samples: int = 20,
+        eval_n_samples: int = 20,
         model: str = "gpt-4.1-mini",
         system_description: str = "",
         score_fn,
@@ -46,6 +47,7 @@ class NOptimizer:
         self.eval_fn = eval_fn
         self.max_iterations = max_iterations
         self.n_samples = n_samples
+        self.eval_n_samples = eval_n_samples
         self.model = model
         self.system_description = system_description
         self.score_fn = score_fn
@@ -156,7 +158,7 @@ class NOptimizer:
                     eval_fn=self.eval_fn,
                     target_factory=self.target_factory,
                     baseline_score=baseline,
-                    n_samples=self.n_samples,
+                    n_samples=self.eval_n_samples,
                     seed=43,
                 )
 
@@ -190,14 +192,26 @@ class NOptimizer:
                     print(f"[NOA] Stopping (2 consecutive cycles with no accepted patch).")
                     break
 
-        print(f"\n[NOA] === Done ===")
-        print(f"[NOA] Final F1: {baseline:.2f}")
-        print(f"[NOA] Iterations: {len(self.history)}")
         accepted_count = sum(1 for h in self.history if h["accepted"])
+
+        # 全量最终评估（用完整 n_samples 测真实分数）
+        if accepted_count > 0 and self.n_samples != self.eval_n_samples:
+            print(f"\n[NOA] === Final Evaluation ({self.n_samples} samples) ===")
+            final_trajectories = observe(
+                self.target, self.dataset, self.n_samples,
+                seed=43, score_fn=self.score_fn,
+            )
+            final_score = sum(t.f1 for t in final_trajectories) / len(final_trajectories) * 100
+        else:
+            final_score = baseline
+
+        print(f"\n[NOA] === Done ===")
+        print(f"[NOA] Final F1: {final_score:.2f}")
+        print(f"[NOA] Iterations: {len(self.history)}")
         print(f"[NOA] Accepted patches: {accepted_count}/{len(self.history)}")
 
         return {
-            "final_score": baseline,
+            "final_score": final_score,
             "baseline_score": self.sys_desc.baseline_score,
             "iterations": len(self.history),
             "accepted": accepted_count,

@@ -22,6 +22,7 @@ def run_l1_subprocess(
     model: str,
     timeout: int = 1200,
     isolate_source: bool = False,
+    eval_n_samples: int = 20,
 ) -> dict:
     """在子进程中运行 L1 NOptimizer，返回结果 dict。
 
@@ -97,6 +98,7 @@ def run_l1_subprocess(
             eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=4),
             max_iterations={iterations},
             n_samples={n_samples},
+            eval_n_samples={eval_n_samples},
             model={model!r},
             score_fn=score_fn,
         )

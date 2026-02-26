@@ -31,6 +31,7 @@ class L1Target:
         iterations: int,
         n_samples: int,
         model: str,
+        eval_n_samples: int = 20,
     ):
         self.noa_dir = noa_dir
         self.project_root = project_root
@@ -39,6 +40,7 @@ class L1Target:
         self.iterations = iterations
         self.n_samples = n_samples
         self.model = model
+        self.eval_n_samples = eval_n_samples
 
     def __call__(self, question: str) -> SimpleNamespace:
         """question 被忽略，仅作触发。返回 L1 运行结果。"""
@@ -49,6 +51,7 @@ class L1Target:
             dataset_pickle_path=self.dataset_pickle_path,
             iterations=self.iterations,
             n_samples=self.n_samples,
+            eval_n_samples=self.eval_n_samples,
             model=self.model,
             isolate_source=True,  # L2 调用 L1 时必须隔离，避免 L1 patch 污染共享 target 代码
         )
@@ -73,6 +76,7 @@ class Orchestrator:
         *,
         l1_max_iterations: int = 5,
         l1_n_samples: int = 20,
+        l1_eval_n_samples: int = 20,
         l1_model: str = "gpt-4.1-mini",
         l2_max_iterations: int = 3,
         l2_n_samples: int | None = None,
@@ -87,6 +91,7 @@ class Orchestrator:
 
         self.l1_max_iterations = l1_max_iterations
         self.l1_n_samples = l1_n_samples
+        self.l1_eval_n_samples = l1_eval_n_samples
         self.l1_model = l1_model
 
         self.l2_max_iterations = l2_max_iterations
@@ -166,6 +171,7 @@ class Orchestrator:
             dataset_pickle_path=self.dataset_pickle_path,
             iterations=self.l1_max_iterations,
             n_samples=self.l1_n_samples,
+            eval_n_samples=self.l1_eval_n_samples,
             model=self.l1_model,
         )
 
@@ -193,6 +199,8 @@ class Orchestrator:
         l1_samples = self.l1_n_samples
         model = self.l2_model
 
+        l1_eval_samples = self.l1_eval_n_samples
+
         def l2_target_factory(noa_dir: str) -> L1Target:
             return L1Target(
                 noa_dir=noa_dir,
@@ -202,6 +210,7 @@ class Orchestrator:
                 iterations=l1_iters,
                 n_samples=l1_samples,
                 model=model,
+                eval_n_samples=l1_eval_samples,
             )
 
         l2_n = self.l2_n_samples  # 默认 1

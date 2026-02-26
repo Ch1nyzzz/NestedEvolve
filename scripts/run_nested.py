@@ -21,7 +21,8 @@ def main():
     parser = argparse.ArgumentParser(description="NOA L1+L2 Nested Optimizer")
     parser.add_argument("--n", type=int, default=50, help="Dataset size")
     parser.add_argument("--l1-iterations", type=int, default=1, help="L1 max iterations")
-    parser.add_argument("--l1-samples", type=int, default=20, help="L1 samples per iteration")
+    parser.add_argument("--l1-samples", type=int, default=50, help="L1 observe/final samples")
+    parser.add_argument("--l1-eval-samples", type=int, default=20, help="L1 per-patch eval samples")
     parser.add_argument("--l2-iterations", type=int, default=1, help="L2 max iterations")
     parser.add_argument("--l2-n-samples", type=int, default=None, help="L2 evaluate runs (default=1)")
     parser.add_argument("--l2-rounds", type=int, default=1, help="Max L2 rounds")
@@ -50,6 +51,7 @@ def main():
         score_fn=f1_score,
         l1_max_iterations=args.l1_iterations,
         l1_n_samples=args.l1_samples,
+        l1_eval_n_samples=args.l1_eval_samples,
         l1_model=args.model,
         l2_max_iterations=args.l2_iterations,
         l2_n_samples=args.l2_n_samples,
