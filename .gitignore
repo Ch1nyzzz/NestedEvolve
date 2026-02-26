@@ -1,0 +1,8 @@
+memory_bank/
+Papers/
+CLAUDE.md
+.DS_Store
+.env
+__pycache__/
+.noa_runs/
+.noa_cache/

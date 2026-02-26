@@ -1,0 +1,256 @@
+{
+  "final_score": 48.36,
+  "baseline_score": 46.00865800865801,
+  "rounds": [
+    {
+      "round": 0,
+      "l1_result": {
+        "final_score": 52.16,
+        "baseline_score": 46.00865800865801,
+        "iterations": 5,
+        "accepted": 1,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Retriever returns empty or insufficient content leading to no useful retrieval context for downstream components.",
+            "severity": "high",
+            "diagnosis": "Retriever returns empty or insufficient content leading to no useful retrieval context for downstream components.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n            self.fallback_engine = WikipediaRetriever()\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n            self.fallback_engine = None\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n            self.fallback_engine = None\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n            self.fallback_engine = None\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        # Fallback to fallback_engine if no passages found and fallback_engine exists\n        if not passages and self.fallback_engine is not None:\n            passages = self.fallback_engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Add fallback mechanism in Retriever component to ensure retrieval content is not empty, especially for wiki_semantic backend which may fail silently. This improves robustness and provides useful context for downstream components.",
+            "before": 46.00865800865801,
+            "after": 41.56,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "InfoExtractor outputs keywords with inconsistent formatting or extra prefixes causing retrieval input to be malformed.",
+            "severity": "medium",
+            "diagnosis": "InfoExtractor outputs keywords with inconsistent formatting or extra prefixes causing retrieval input to be malformed.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"search_keywords\": resp.text}",
+                "replace": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Clean up response text by removing any leading \"Keywords:\" prefix and stripping whitespace\n        text = resp.text.strip()\n        if text.lower().startswith(\"keywords:\"):\n            text = text[len(\"keywords:\"):].strip()\n        return {\"search_keywords\": text}"
+              }
+            ],
+            "rationale": "Clean the InfoExtractor output to remove 'Keywords:' prefix and extra whitespace to ensure Retriever receives clean keywords string, fixing malformed retrieval input.",
+            "before": 46.00865800865801,
+            "after": 52.16,
+            "accepted": true
+          },
+          {
+            "iteration": 1,
+            "pattern": "AnswerGenerator produces answers that repeat or restate lack of information instead of attempting to answer.",
+            "severity": "medium",
+            "diagnosis": "AnswerGenerator produces answers that repeat or restate lack of information instead of attempting to answer.",
+            "diffs": [
+              {
+                "file_path": "prompts.py",
+                "search": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer.\"",
+                "replace": "ANSWER_GENERATOR = (\n    \"Given some hints, directly answer the query with a short and concise answer. \"\n    \"If the hints are incomplete or inconclusive, provide the best possible answer or say 'unknown' briefly.\"\n)"
+              }
+            ],
+            "rationale": "Improve the answer generation prompt template to encourage concise best-guess answers and reduce vague disclaimers, addressing the issue of repeated non-answers in AnswerGenerator.",
+            "before": 52.16,
+            "after": 37.38,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever uses a fixed number k for retrieval but underlying retrievers may return fewer results or empty results without warning.",
+            "severity": "medium",
+            "diagnosis": "Retriever uses a fixed number k for retrieval but underlying retrievers may return fewer results or empty results without warning.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n            self.fallback_engine = WikipediaRetriever()\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n            self.fallback_engine = None\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n            self.fallback_engine = None\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n            self.fallback_engine = None\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        # Fallback to fallback_engine if no passages found and fallback_engine exists\n        if not passages and self.fallback_engine is not None:\n            passages = self.fallback_engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Add fallback retrieval in Retriever component to handle empty results from primary retriever, improving robustness and avoiding empty retrieve_content.",
+            "before": 52.16,
+            "after": 39.79,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever component does not handle empty corpus or missing corpus for 'local' backend gracefully.",
+            "severity": "low",
+            "diagnosis": "Retriever component does not handle empty corpus or missing corpus for 'local' backend gracefully.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n            self.fallback_engine = WikipediaRetriever()\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n            self.fallback_engine = None\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n            self.fallback_engine = None\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n            self.fallback_engine = None\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        # Fallback to fallback_engine if no passages found and fallback_engine exists\n        if not passages and self.fallback_engine is not None:\n            passages = self.fallback_engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              },
+              {
+                "file_path": "components.py",
+                "search": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"search_keywords\": resp.text}",
+                "replace": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Clean up response text by removing any leading \"Keywords:\" prefix and stripping whitespace\n        text = resp.text.strip()\n        if text.lower().startswith(\"keywords:\"):\n            text = text[len(\"keywords:\"):].strip()\n        return {\"search_keywords\": text}"
+              }
+            ],
+            "rationale": "Add fallback retriever in Retriever component for wiki_semantic backend to improve robustness and avoid empty retrieval results. Clean InfoExtractor output to remove 'Keywords:' prefix for cleaner retrieval input.",
+            "before": 52.16,
+            "after": 38.72,
+            "accepted": false
+          }
+        ]
+      },
+      "l2_result": {
+        "final_score": 52.16,
+        "baseline_score": 52.16,
+        "iterations": 2,
+        "accepted": 0,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Analyzer misses recurring failure patterns related to Retriever and InfoExtractor issues",
+            "severity": "high",
+            "diagnosis": "Analyzer misses recurring failure patterns related to Retriever and InfoExtractor issues",
+            "diffs": [
+              "DiffBlock(file_path='stages/analyzer.py', search='ANALYZER_PROMPT = \"\"\"\\\\\\n## System\\n{system_context}\\n\\n## Source Code\\n{source_code}\\n\\n## Failed Trajectories ({n_failures} / {n_total})\\n{trajectories}\\n\\n## Past Attempts\\n{past_attempts}\\n\\nAnalyze the failures by reading the source code. Avoid repeating past failed approaches. For each pattern:\\n1. Pattern description\\n2. Root cause (which component, which code, why)\\n3. Severity (high/medium/low)\\n4. Affected file (which source file contains the problematic code)\\n5. Suggested fix (brief description of what code change would help)\\n\\nOutput JSON: [{{\"pattern\": \"...\", \"root_cause\": \"...\", \"affected_component\": \"...\", \"severity\": \"...\", \"affected_file\": \"...\", \"suggested_fix\": \"...\"}}]\\n\"\"\"', replace='ANALYZER_PROMPT = \"\"\"\\\\\\n## System\\n{system_context}\\n\\n## Source Code\\n{source_code}\\n\\n## Failed Trajectories ({n_failures} / {n_total})\\n{trajectories}\\n\\n## Past Attempts\\n{past_attempts}\\n\\nAnalyze the failures by reading the source code and intermediate outputs. Pay special attention to retrieval-related failures such as empty or incomplete retrieval results, malformed keyword outputs, and any anomalies in intermediate component outputs.\\n\\nFor each failure pattern, provide:\\n1. Pattern description with examples\\n2. Root cause analysis specifying which component and code are involved and why\\n3. Severity (high/medium/low)\\n4. Affected file (which source file contains the problematic code)\\n5. Suggested fix (brief description of what code change would help)\\n\\nAvoid repeating past failed approaches. If uncertain, highlight potential subtle issues in Retriever or InfoExtractor components.\\n\\nOutput JSON: [{{\"pattern\": \"...\", \"root_cause\": \"...\", \"affected_component\": \"...\", \"severity\": \"...\", \"affected_file\": \"...\", \"suggested_fix\": \"...\"}}]\\n\"\"\"')"
+            ],
+            "rationale": "",
+            "before": 52.16,
+            "after": 52.16,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "Optimizer generates ineffective or empty patches due to insufficient diff generation constraints",
+            "severity": "high",
+            "diagnosis": "Optimizer generates ineffective or empty patches due to insufficient diff generation constraints",
+            "diffs": [
+              "DiffBlock(file_path='stages/optimizer.py', search='-exact original code\\n-', replace='-replacement code\\n-')",
+              "DiffBlock(file_path='stages/optimizer.py', search='+exact original code\\n+', replace='+replacement code\\n+')"
+            ],
+            "rationale": "",
+            "before": 52.16,
+            "after": 52.16,
+            "accepted": false
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "l1_result": {
+        "final_score": 48.36,
+        "baseline_score": 34.62783148787206,
+        "iterations": 5,
+        "accepted": 2,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Retriever returns empty or insufficient retrieved content despite valid search keywords, leading to answer generation based on no evidence.",
+            "severity": "high",
+            "diagnosis": "Retriever returns empty or insufficient retrieved content despite valid search keywords, leading to answer generation based on no evidence.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            passages = [\"[No relevant passages found.]\"]\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              },
+              {
+                "file_path": "retriever.py",
+                "search": "    def retrieve(self, query: str, k: int = 3) -> list[str]:\n        query_vec = self.vectorizer.transform([query])\n        scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()\n        top_indices = np.argsort(scores)[-k:][::-1]\n        return [self.corpus[i] for i in top_indices if scores[i] > 0]",
+                "replace": "    def retrieve(self, query: str, k: int = 3) -> list[str]:\n        query_vec = self.vectorizer.transform([query])\n        scores = cosine_similarity(query_vec, self.tfidf_matrix).flatten()\n        top_indices = np.argsort(scores)[-k:][::-1]\n        # Return top k passages regardless of zero similarity to avoid empty results\n        return [self.corpus[i] for i in top_indices]"
+              }
+            ],
+            "rationale": "Ensure Retriever.forward never returns empty retrieve_content by adding a fallback placeholder if no passages are retrieved. Also adjust LocalRetriever.retrieve to always return top k passages regardless of zero similarity to avoid empty results, preventing downstream components from working with empty evidence.",
+            "before": 34.62783148787206,
+            "after": 45.43,
+            "accepted": true
+          },
+          {
+            "iteration": 1,
+            "pattern": "AnswerGenerator produces confident but incorrect answers even when retrieved content is empty or irrelevant.",
+            "severity": "high",
+            "diagnosis": "AnswerGenerator produces confident but incorrect answers even when retrieved content is empty or irrelevant.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}",
+                "replace": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        # Check if hints are empty or contain no useful info\n        if not hints.strip() or hints.strip().lower() in (\"no hints\", \"[no hints]\", \"no relevant hints\"):\n            return {\"answer\": \"Insufficient information to answer.\"}\n\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}"
+              }
+            ],
+            "rationale": "Prevent AnswerGenerator from hallucinating confident answers when hints are empty or uninformative by adding a guard clause that returns a fallback answer.",
+            "before": 45.43,
+            "after": 33.99,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "InfoExtractor outputs search keywords with inconsistent formatting, sometimes including 'Keywords:' prefix or line breaks, causing Retriever to receive malformed queries.",
+            "severity": "medium",
+            "diagnosis": "InfoExtractor outputs search keywords with inconsistent formatting, sometimes including 'Keywords:' prefix or line breaks, causing Retriever to receive malformed queries.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Clean up response text by removing any leading \"Keywords:\" prefix and stripping whitespace\n        text = resp.text.strip()\n        if text.lower().startswith(\"keywords:\"):\n            text = text[len(\"keywords:\"):].strip()\n        return {\"search_keywords\": text}",
+                "replace": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Clean and normalize response text by removing any leading \"Keywords:\" prefix (case insensitive) and trailing punctuation,\n        # then replace newlines and semicolons with commas, and collapse multiple spaces.\n        text = resp.text.strip()\n        # Remove any leading \"Keywords:\" prefix (case insensitive) with optional trailing colon or punctuation\n        import re\n        text = re.sub(r\"(?i)^keywords\\s*[:：]?\\s*\", \"\", text)\n        # Replace newlines and semicolons with commas\n        text = re.sub(r\"[\\n;；]+\", \", \", text)\n        # Collapse multiple commas/spaces\n        text = re.sub(r\"\\s*,\\s*\", \", \", text)\n        text = re.sub(r\"\\s+\", \" \", text).strip(\", \").strip()\n        return {\"search_keywords\": text}"
+              }
+            ],
+            "rationale": "Fix InfoExtractor to robustly clean output text by removing any 'Keywords:' prefix regardless of case and trailing punctuation, normalize separators (commas, newlines, semicolons) and whitespace to produce a clean single-line keyword string, preventing malformed queries to Retriever.",
+            "before": 45.43,
+            "after": 48.36,
+            "accepted": true
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever backend selection logic does not handle 'colbert' backend explicitly, defaulting to HybridRetriever which may fallback frequently and cause empty retrieval results.",
+            "severity": "medium",
+            "diagnosis": "Retriever backend selection logic does not handle 'colbert' backend explicitly, defaulting to HybridRetriever which may fallback frequently and cause empty retrieval results.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            passages = [\"[No relevant passages found.]\"]\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        elif config.backend == \"colbert\":\n            from .retriever import ColBERTv2Retriever\n            self.engine = ColBERTv2Retriever(config.colbert_url)\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            passages = [\"[No relevant passages found.]\"]\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Explicitly handle 'colbert' backend in Retriever.__init__ to instantiate ColBERTv2Retriever directly, avoiding fallback logic and potential empty retrievals.",
+            "before": 48.36,
+            "after": 42.9,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever's LocalRetriever.retrieve filters out passages with zero similarity, potentially returning fewer than requested k passages or empty list.",
+            "severity": "medium",
+            "diagnosis": "Retriever's LocalRetriever.retrieve filters out passages with zero similarity, potentially returning fewer than requested k passages or empty list.",
+            "diffs": [
+              {
+                "file_path": "prompts.py",
+                "search": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer.\"",
+                "replace": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer. If hints are insufficient, respond with 'Insufficient information to answer.'\""
+              },
+              {
+                "file_path": "components.py",
+                "search": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}",
+                "replace": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        # If hints are empty or uninformative, return fallback answer\n        if not hints.strip() or hints.strip().lower() in (\"no hints\", \"[no hints]\", \"no relevant hints\"):\n            return {\"answer\": \"Insufficient information to answer.\"}\n\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}"
+              }
+            ],
+            "rationale": "Prevent hallucination by AnswerGenerator when hints are empty or uninformative by adding a fallback answer and updating prompt to instruct model accordingly.",
+            "before": 48.36,
+            "after": 20.0,
+            "accepted": false
+          }
+        ]
+      }
+    }
+  ],
+  "total_rounds": 2,
+  "run_dir": "/Users/erv1n/NestedAgent/.noa_runs/20260225_164016",
+  "snapshots": [
+    "after_l1_round_0",
+    "after_l1_round_1",
+    "after_l2_round_0",
+    "init"
+  ]
+}

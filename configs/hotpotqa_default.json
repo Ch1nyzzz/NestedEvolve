@@ -1,0 +1,38 @@
+{
+  "question_rewriter": {
+    "name": "question_rewriter",
+    "prompt_template": "Rephrase the question to make it clearer and easier to answer.",
+    "model": "gpt-4o-mini",
+    "max_tokens": 300,
+    "temperature": 0
+  },
+  "info_extractor": {
+    "name": "info_extractor",
+    "prompt_template": "Extract keywords from the query to retrieve relevant content.",
+    "model": "gpt-4o-mini",
+    "max_tokens": 300,
+    "temperature": 0
+  },
+  "retriever": {
+    "backend": "wiki_semantic",
+    "k": 3,
+    "k_search_space": [1, 2, 3, 5, 7],
+    "colbert_url": "http://20.102.90.50:2017/wiki17_abstracts",
+    "embed_model": "all-MiniLM-L6-v2",
+    "n_search": 10
+  },
+  "hint_generator": {
+    "name": "hint_generator",
+    "prompt_template": "Generate useful hints to answer the query based on the retrieved content.",
+    "model": "gpt-4o-mini",
+    "max_tokens": 300,
+    "temperature": 0
+  },
+  "answer_generator": {
+    "name": "answer_generator",
+    "prompt_template": "Given some hints, directly answer the query with a short answer.",
+    "model": "gpt-4o-mini",
+    "max_tokens": 300,
+    "temperature": 0
+  }
+}

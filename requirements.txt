@@ -1,0 +1,7 @@
+litellm
+datasets
+requests
+python-dotenv
+tqdm
+scikit-learn
+sentence-transformers

@@ -1,0 +1,225 @@
+{
+  "final_score": 45.19,
+  "baseline_score": 27.86556743909685,
+  "rounds": [
+    {
+      "round": 0,
+      "l1_result": {
+        "final_score": 41.87,
+        "baseline_score": 27.86556743909685,
+        "iterations": 5,
+        "accepted": 1,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Retriever returns empty content when no results are found",
+            "severity": "high",
+            "diagnosis": "Retriever returns empty content when no results are found",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            content = \"No relevant content found.\"\n        else:\n            content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Add a fallback message in Retriever.forward() when no passages are retrieved to avoid downstream components receiving empty context.",
+            "before": 27.86556743909685,
+            "after": 41.87,
+            "accepted": true
+          },
+          {
+            "iteration": 1,
+            "pattern": "InfoExtractor outputs keywords as raw LLM text without normalization",
+            "severity": "medium",
+            "diagnosis": "InfoExtractor outputs keywords as raw LLM text without normalization",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"search_keywords\": resp.text}",
+                "replace": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Normalize keywords: split by lines, commas, semicolons, strip spaces, join by space\n        raw_text = resp.text.strip()\n        # Split by common separators and newlines\n        import re\n        keywords = re.split(r\"[\\n,;]+\", raw_text)\n        keywords = [kw.strip() for kw in keywords if kw.strip()]\n        normalized_keywords = \" \".join(keywords)\n        return {\"search_keywords\": normalized_keywords}"
+              }
+            ],
+            "rationale": "Normalize the raw LLM output from InfoExtractor to produce a clean, space-separated keyword string for Retriever, improving retrieval quality.",
+            "before": 41.87,
+            "after": 28.7,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "AnswerGenerator and HintGenerator rely solely on LLM output without validation",
+            "severity": "medium",
+            "diagnosis": "AnswerGenerator and HintGenerator rely solely on LLM output without validation",
+            "diffs": [
+              {
+                "file_path": "prompts.py",
+                "search": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer.\"",
+                "replace": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer. If hints are empty or irrelevant, respond with 'No sufficient information to answer.'\""
+              },
+              {
+                "file_path": "components.py",
+                "search": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}",
+                "replace": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        # If hints are empty or contain no useful info, return safe default answer\n        if not hints.strip() or hints.strip().lower() in (\"no relevant hints.\", \"no sufficient information.\", \"no sufficient information to answer.\"):\n            return {\"answer\": \"No sufficient information to answer.\"}\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}"
+              },
+              {
+                "file_path": "components.py",
+                "search": "class HintGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, retrieve_content: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Retrieved content:\\n{retrieve_content}\\n\\n\"\n            f\"Hints:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"hints\": resp.text}",
+                "replace": "class HintGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, retrieve_content: str, **_) -> dict:\n        # If retrieved content is empty or default no content message, return safe default hints\n        if not retrieve_content.strip() or retrieve_content.strip() == \"No relevant content found.\":\n            return {\"hints\": \"No relevant hints.\"}\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Retrieved content:\\n{retrieve_content}\\n\\n\"\n            f\"Hints:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"hints\": resp.text}"
+              }
+            ],
+            "rationale": "Add fallback checks in HintGenerator and AnswerGenerator to avoid hallucination when retrieve_content or hints are empty or default 'no content' messages, returning safe default responses instead. Also update ANSWER_GENERATOR prompt to instruct LLM to respond safely when hints are insufficient.",
+            "before": 41.87,
+            "after": 0.0,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever backend selection does not handle 'colbert' backend explicitly",
+            "severity": "low",
+            "diagnosis": "Retriever backend selection does not handle 'colbert' backend explicitly",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        elif config.backend == \"colbert\":\n            from .retriever import ColBERTv2Retriever\n            self.engine = ColBERTv2Retriever(config.colbert_url)\n        else:\n            self.engine = HybridRetriever(config.colbert_url)"
+              }
+            ],
+            "rationale": "Explicitly handle 'colbert' backend in Retriever.__init__() to instantiate ColBERTv2Retriever alone, avoiding fallback to HybridRetriever and clarifying backend options.",
+            "before": 41.87,
+            "after": 31.11,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "No explicit error handling or logging in pipeline execution",
+            "severity": "low",
+            "diagnosis": "No explicit error handling or logging in pipeline execution",
+            "diffs": [
+              {
+                "file_path": "pipeline.py",
+                "search": "    def __call__(self, question: str) -> PipelineResult:\n        ctx = {\"question\": question}\n        intermediate = {}\n\n        for name, component in self.components:\n            output = component.forward(**ctx)\n            ctx.update(output)\n            intermediate[name] = output\n\n        return PipelineResult(\n            answer=ctx.get(\"answer\", \"\"),\n            intermediate=intermediate,\n        )",
+                "replace": "    def __call__(self, question: str) -> PipelineResult:\n        import logging\n\n        ctx = {\"question\": question}\n        intermediate = {}\n\n        for name, component in self.components:\n            try:\n                output = component.forward(**ctx)\n                if not isinstance(output, dict):\n                    logging.warning(f\"Component {name} returned non-dict output: {output}\")\n                    output = {}\n                ctx.update(output)\n                intermediate[name] = output\n            except Exception as e:\n                logging.error(f\"Error in component {name}: {e}\", exc_info=True)\n                intermediate[name] = {\"error\": str(e)}\n                break\n\n        return PipelineResult(\n            answer=ctx.get(\"answer\", \"\"),\n            intermediate=intermediate,\n        )"
+              }
+            ],
+            "rationale": "Add error handling and logging in RAGPipeline.__call__ to catch and log exceptions or unexpected outputs from components, improving debuggability.",
+            "before": 41.87,
+            "after": 22.01,
+            "accepted": false
+          }
+        ]
+      },
+      "l2_result": {
+        "final_score": 49.65079365079365,
+        "baseline_score": 41.87,
+        "iterations": 1,
+        "accepted": 1,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Analyzer misses subtle failure patterns due to limited trajectory context and prompt detail",
+            "severity": "high",
+            "diagnosis": "Analyzer misses subtle failure patterns due to limited trajectory context and prompt detail",
+            "diffs": [
+              "DiffBlock(file_path='stages/analyzer.py', search='def analyze(\\n    sys_desc: SystemDescription,\\n    trajectories: list[Trajectory],\\n    model: str = \"gpt-4.1-mini\",\\n    failure_threshold: float | None = None,\\n    past_attempts: str = \"\",\\n) -> Diagnosis:\\n    \"\"\"分析失败轨迹 + 源码，输出结构化诊断。\"\"\"\\n    if failure_threshold is None:\\n        scores = sorted(t.f1 for t in trajectories)\\n        failure_threshold = scores[len(scores) // 2] if scores else 0.5\\n    failures = [t for t in trajectories if t.f1 < failure_threshold]\\n    successes = [t for t in trajectories if t.f1 >= failure_threshold]\\n\\n    # 构造轨迹文本：所有失败 + 少量成功做对比\\n    traj_lines = []\\n    for t in failures:\\n        traj_lines.append(_format_trajectory(t, label=\"FAIL\"))\\n    for t in successes[:3]:\\n        traj_lines.append(_format_trajectory(t, label=\"OK\"))\\n\\n    prompt = prompts.ANALYZER_PROMPT.format(\\n        system_context=sys_desc.to_context_str(),\\n        source_code=sys_desc.get_source_context(),\\n        n_failures=len(failures),\\n        n_total=len(trajectories),\\n        trajectories=\"\\\\n---\\\\n\".join(traj_lines) if traj_lines else \"(no trajectories)\",\\n        past_attempts=past_attempts or \"(none)\",\\n    )\\n\\n    resp = llm_call(\\n        prompt, model=model, max_tokens=16384,\\n        temperature=0.3, system=prompts.ANALYZER_SYSTEM,\\n    )\\n\\n    patterns = _parse_patterns(resp.text)\\n    summary = \"; \".join(p.get(\"pattern\", \"\") for p in patterns[:3]) if patterns else \"No patterns found.\"\\n\\n    return Diagnosis(\\n        failure_patterns=patterns,\\n        summary=summary,\\n        raw_analysis=resp.text,\\n    )', replace='def analyze(\\n    sys_desc: SystemDescription,\\n    trajectories: list[Trajectory],\\n    model: str = \"gpt-4.1-mini\",\\n    failure_threshold: float | None = None,\\n    past_attempts: str = \"\",\\n) -> Diagnosis:\\n    \"\"\"分析失败轨迹 + 源码，输出结构化诊断。\"\"\"\\n    if failure_threshold is None:\\n        scores = sorted(t.f1 for t in trajectories)\\n        failure_threshold = scores[len(scores) // 2] if scores else 0.5\\n    failures = [t for t in trajectories if t.f1 < failure_threshold]\\n    successes = [t for t in trajectories if t.f1 >= failure_threshold]\\n\\n    # 构造轨迹文本：更多失败 + 少量成功做对比，增加中间结果详情\\n    traj_lines = []\\n    # 包含最多 10 个失败样本\\n    for t in failures[:10]:\\n        traj_lines.append(_format_trajectory(t, label=\"FAIL\"))\\n    # 包含最多 5 个成功样本\\n    for t in successes[:5]:\\n        traj_lines.append(_format_trajectory(t, label=\"OK\"))\\n\\n    prompt = prompts.ANALYZER_PROMPT.format(\\n        system_context=sys_desc.to_context_str(),\\n        source_code=sys_desc.get_source_context(),\\n        n_failures=len(failures),\\n        n_total=len(trajectories),\\n        trajectories=\"\\\\n---\\\\n\".join(traj_lines) if traj_lines else \"(no trajectories)\",\\n        past_attempts=past_attempts or \"(none)\",\\n    )\\n\\n    resp = llm_call(\\n        prompt, model=model, max_tokens=16384,\\n        temperature=0.3, system=prompts.ANALYZER_SYSTEM,\\n    )\\n\\n    patterns = _parse_patterns(resp.text)\\n    summary = \"; \".join(p.get(\"pattern\", \"\") for p in patterns[:3]) if patterns else \"No patterns found.\"\\n\\n    return Diagnosis(\\n        failure_patterns=patterns,\\n        summary=summary,\\n        raw_analysis=resp.text,\\n    )')"
+            ],
+            "rationale": "",
+            "before": 41.87,
+            "after": 49.65079365079365,
+            "accepted": true
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "l1_result": {
+        "final_score": 45.19,
+        "baseline_score": 41.515595515595514,
+        "iterations": 4,
+        "accepted": 1,
+        "history": [
+          {
+            "iteration": 1,
+            "pattern": "Retriever returns empty or irrelevant content leading to poor hint generation and incorrect answers.",
+            "severity": "high",
+            "diagnosis": "Retriever returns empty or irrelevant content leading to poor hint generation and incorrect answers.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            content = \"No relevant content found.\"\n        else:\n            content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            content = \"\"\n        else:\n            content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Returning an empty string instead of a generic 'No relevant content found.' allows downstream components to better handle the absence of retrieved content, avoiding misleading or uninformative hints and answers.",
+            "before": 41.515595515595514,
+            "after": 28.3,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "InfoExtractor outputs unstructured or inconsistent keywords that degrade retrieval quality.",
+            "severity": "medium",
+            "diagnosis": "InfoExtractor outputs unstructured or inconsistent keywords that degrade retrieval quality.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"search_keywords\": resp.text}",
+                "replace": "class InfoExtractor(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, **_) -> dict:\n        prompt = f\"{self.config.prompt_template}\\n\\nQuery: {rewritten_query}\\n\\nKeywords:\"\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Clean and extract keywords: split by commas or newlines, strip whitespace, join by commas\n        raw_text = resp.text.strip()\n        # Split by commas or newlines\n        parts = [kw.strip() for line in raw_text.splitlines() for kw in line.split(\",\")]\n        # Filter out empty strings\n        keywords = [kw for kw in parts if kw]\n        clean_keywords = \", \".join(keywords)\n        return {\"search_keywords\": clean_keywords}"
+              }
+            ],
+            "rationale": "Clean and normalize the InfoExtractor output to produce concise, comma-separated keywords, reducing noise in retrieval queries and improving retrieval quality.",
+            "before": 41.515595515595514,
+            "after": 31.77,
+            "accepted": false
+          },
+          {
+            "iteration": 1,
+            "pattern": "AnswerGenerator produces verbose answers including context rather than concise direct answers.",
+            "severity": "low",
+            "diagnosis": "AnswerGenerator produces verbose answers including context rather than concise direct answers.",
+            "diffs": [
+              {
+                "file_path": "prompts.py",
+                "search": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short answer.\"",
+                "replace": "ANSWER_GENERATOR = \"Given some hints, directly answer the query with a short, concise answer without extra context.\""
+              },
+              {
+                "file_path": "components.py",
+                "search": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        return {\"answer\": resp.text}",
+                "replace": "class AnswerGenerator(BaseComponent):\n    def __init__(self, config: ComponentConfig):\n        self.config = config\n\n    def forward(self, *, rewritten_query: str, hints: str, **_) -> dict:\n        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f\"Query: {rewritten_query}\\n\\n\"\n            f\"Hints:\\n{hints}\\n\\n\"\n            f\"Answer:\"\n        )\n        resp = llm_call(\n            prompt,\n            model=self.config.model,\n            max_tokens=self.config.max_tokens,\n            temperature=self.config.temperature,\n        )\n        # Post-process to extract only the first paragraph or first line as concise answer\n        answer = resp.text.strip().split(\"\\n\\n\")[0].split(\"\\n\")[0]\n        return {\"answer\": answer}"
+              }
+            ],
+            "rationale": "Modify the answer generator prompt to emphasize concise direct answers and post-process the LLM output to extract only the first paragraph or line, ensuring the answer is short and direct.",
+            "before": 41.515595515595514,
+            "after": 45.19,
+            "accepted": true
+          },
+          {
+            "iteration": 1,
+            "pattern": "Retriever backend selection logic lacks explicit handling for invalid backend names.",
+            "severity": "low",
+            "diagnosis": "Retriever backend selection logic lacks explicit handling for invalid backend names.",
+            "diffs": [
+              {
+                "file_path": "components.py",
+                "search": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        else:\n            self.engine = HybridRetriever(config.colbert_url)\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            content = \"No relevant content found.\"\n        else:\n            content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}",
+                "replace": "class Retriever(BaseComponent):\n    def __init__(self, config: RetrieverConfig, corpus: list[str] | None = None):\n        self.config = config\n        if config.backend == \"wiki_semantic\":\n            self.engine = WikiSemanticRetriever(\n                model_name=config.embed_model,\n                n_search=config.n_search,\n            )\n        elif config.backend == \"local\":\n            if corpus is None:\n                raise ValueError(\"backend='local' 需要提供 corpus\")\n            self.engine = LocalRetriever(corpus)\n        elif config.backend == \"wikipedia\":\n            self.engine = WikipediaRetriever()\n        elif config.backend == \"colbert\":\n            self.engine = HybridRetriever(config.colbert_url)\n        else:\n            raise ValueError(f\"Unsupported retriever backend: {config.backend}\")\n\n    def forward(self, *, search_keywords: str, **_) -> dict:\n        passages = self.engine.retrieve(search_keywords, k=self.config.k)\n        if not passages:\n            content = \"No relevant content found.\"\n        else:\n            content = \"\\n\\n\".join(f\"[{i+1}] {p}\" for i, p in enumerate(passages))\n        return {\"retrieve_content\": content}"
+              }
+            ],
+            "rationale": "Add explicit validation for retriever backend to avoid silent fallback to HybridRetriever on invalid backend names.",
+            "before": 45.19,
+            "after": 40.33,
+            "accepted": false
+          }
+        ]
+      }
+    }
+  ],
+  "total_rounds": 2,
+  "run_dir": "/Users/erv1n/NestedAgent/.noa_runs/20260225_171119",
+  "snapshots": [
+    "after_l1_round_0",
+    "after_l1_round_1",
+    "after_l2_round_0",
+    "init"
+  ]
+}
