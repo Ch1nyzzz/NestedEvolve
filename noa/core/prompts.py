@@ -45,6 +45,35 @@ Analyze the failures by reading the source code. Avoid repeating past failed app
 Output JSON: [{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "...", "affected_file": "...", "suggested_fix": "..."}}]
 """
 
+# --- Single-Trajectory Analyzer (incremental pool-based) ---
+
+SINGLE_ANALYZER_SYSTEM = "You are an expert error analyst for AI pipelines. You diagnose one failure at a time and categorize it."
+
+SINGLE_ANALYZER_PROMPT = """\
+## System
+{system_context}
+
+## Source Code
+{source_code}
+
+## Current Failure (1 sample)
+{trajectory}
+
+## Existing Failure Pool
+{pool_context}
+
+## Past Attempts
+{past_attempts}
+
+Analyze this single failure by reading the source code.
+
+If the failure matches an EXISTING pattern in the pool, output `merge_to` with the pool index.
+If it is a NEW pattern, omit `merge_to`.
+
+Output JSON (a list with one or a few pattern objects):
+[{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "high|medium|low", "affected_file": "...", "suggested_fix": "...", "merge_to": <int or null>}}]
+"""
+
 # --- Optimizer ---
 
 OPTIMIZER_SYSTEM = "You are a precise code optimizer. You output SEARCH/REPLACE diffs."

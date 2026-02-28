@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Callable
 
-from noa.core.protocol import SystemDescription, Diagnosis, EvalResult
+from noa.core.protocol import SystemDescription, Diagnosis, EvalResult, FailurePool
 from noa.stages.initiator import initiate, collect_sources
 from noa.stages.observer import observe
-from noa.stages.analyzer import analyze
+from noa.stages.analyzer import analyze, analyze_incremental
 from noa.stages.optimizer import optimize
 from noa.stages.evaluator import evaluate
 
@@ -82,6 +82,7 @@ class NOptimizer:
         consecutive_no_accept_cycles = 0
         cycle_idx = 0
         cached_trajectories = init_trajectories  # 第一轮复用
+        failure_pool = FailurePool()  # 跨 cycle 累积的 failure pattern 池
 
         while cycle_idx < self.max_iterations:
             cycle_idx += 1
@@ -106,11 +107,16 @@ class NOptimizer:
             n_failures = sum(1 for t in trajectories if t.f1 < ft)
             print(f"[NOA] Observed F1: {mean_f1:.2f}, Failures: {n_failures}/{len(trajectories)}")
 
-            # --- Analyze ---
-            print(f"[NOA] Analyzing failures...")
+            # --- Analyze（逐条诊断，累积到 failure pool）---
+            print(f"[NOA] Analyzing failures incrementally...")
             past = _format_history(self.history)
-            diagnosis = analyze(self.sys_desc, trajectories, model=self.model, failure_threshold=self.failure_threshold, past_attempts=past)
-            print(f"[NOA] Diagnosis: {diagnosis.summary}")
+            diagnosis, failure_pool = analyze_incremental(
+                self.sys_desc, trajectories, model=self.model,
+                failure_threshold=self.failure_threshold,
+                past_attempts=past, pool=failure_pool, top_n=5,
+            )
+            print(f"[NOA] Pool: {len(failure_pool)} unique patterns")
+            print(f"[NOA] Diagnosis (top patterns): {diagnosis.summary}")
 
             if not diagnosis.failure_patterns:
                 consecutive_no_accept_cycles += 1
@@ -121,14 +127,15 @@ class NOptimizer:
                 continue
             # 不在这里重置 consecutive_no_accept_cycles，等内层循环判断是否有 accepted
 
-            # --- 逐个 pattern 优化 ---
-            sorted_patterns = _sort_patterns_by_severity(diagnosis.failure_patterns)
+            # --- 逐个 pattern 优化（已按频率排序，高频优先）---
+            sorted_patterns = diagnosis.failure_patterns  # analyze_incremental 已按 count 排序
             cycle_accepted = False
 
             for p_idx, pattern in enumerate(sorted_patterns):
                 pat_name = pattern.get("pattern", "unknown")
                 pat_severity = pattern.get("severity", "?")
-                print(f"\n[NOA]   --- Pattern {p_idx+1}/{len(sorted_patterns)}: [{pat_severity}] {pat_name} ---")
+                pat_count = pattern.get("count", 1)
+                print(f"\n[NOA]   --- Pattern {p_idx+1}/{len(sorted_patterns)}: [{pat_severity}] {pat_name} (x{pat_count}) ---")
 
                 # 构建单 pattern 的 Diagnosis
                 single_diagnosis = Diagnosis(
