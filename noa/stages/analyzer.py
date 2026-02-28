@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from utils.llm import llm_call
-from noa.core.protocol import SystemDescription, Trajectory, Diagnosis
+from noa.core.protocol import SystemDescription, Trajectory, Diagnosis, FailurePool
 from noa.core import prompts
+
+log = logging.getLogger(__name__)
 
 
 def analyze(
@@ -70,6 +73,62 @@ def _format_trajectory(t: Trajectory, label: str) -> str:
                     val = val[:200] + "..."
                 parts.append(f"  {comp_name}.{k}: {val}")
     return "\n".join(parts)
+
+
+def analyze_incremental(
+    sys_desc: SystemDescription,
+    trajectories: list[Trajectory],
+    model: str = "gpt-4.1-mini",
+    failure_threshold: float | None = None,
+    past_attempts: str = "",
+    pool: FailurePool | None = None,
+    top_n: int = 5,
+) -> tuple[Diagnosis, FailurePool]:
+    """逐条分析失败轨迹，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。"""
+    if pool is None:
+        pool = FailurePool()
+
+    if failure_threshold is None:
+        scores = sorted(t.f1 for t in trajectories)
+        failure_threshold = scores[len(scores) // 2] if scores else 0.5
+    failures = [t for t in trajectories if t.f1 < failure_threshold]
+
+    if not failures:
+        return Diagnosis(failure_patterns=[], summary="No failures.", raw_analysis=""), pool
+
+    for t in failures:
+        traj_text = _format_trajectory(t, label="FAIL")
+
+        prompt = prompts.SINGLE_ANALYZER_PROMPT.format(
+            system_context=sys_desc.to_context_str(),
+            source_code=sys_desc.get_source_context(),
+            trajectory=traj_text,
+            pool_context=pool.to_context_str(),
+            past_attempts=past_attempts or "(none)",
+        )
+
+        resp = llm_call(
+            prompt, model=model, max_tokens=4096,
+            temperature=0, system=prompts.SINGLE_ANALYZER_SYSTEM,
+        )
+
+        new_patterns = _parse_patterns(resp.text)
+        pool.add(new_patterns, example_question=t.question)
+
+    # 取 top-N 作为本轮诊断结果
+    top_patterns = pool.top_n(top_n)
+    summary = "; ".join(
+        f"{p['pattern']} (x{p['count']})" for p in top_patterns[:3]
+    ) if top_patterns else "No patterns found."
+
+    log.info("FailurePool: %d unique patterns from %d failures, top-%d selected",
+             len(pool), len(failures), min(top_n, len(pool)))
+
+    return Diagnosis(
+        failure_patterns=top_patterns,
+        summary=summary,
+        raw_analysis=f"Pool size: {len(pool)}, top {top_n} selected.",
+    ), pool
 
 
 def meta_analyze(
