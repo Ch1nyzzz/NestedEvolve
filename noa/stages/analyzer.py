@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.llm import llm_call
 from noa.core.protocol import SystemDescription, Trajectory, Diagnosis, FailurePool
@@ -83,8 +84,13 @@ def analyze_incremental(
     past_attempts: str = "",
     pool: FailurePool | None = None,
     top_n: int = 5,
+    max_concurrency: int = 8,
 ) -> tuple[Diagnosis, FailurePool]:
-    """逐条分析失败轨迹，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。"""
+    """逐条分析失败轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
+
+    所有 failure 共享同一份 pool 快照作为上下文（来自之前 cycle 的积累），
+    LLM 调用通过线程池并行执行，返回后统一合并到 pool。
+    """
     if pool is None:
         pool = FailurePool()
 
@@ -96,24 +102,45 @@ def analyze_incremental(
     if not failures:
         return Diagnosis(failure_patterns=[], summary="No failures.", raw_analysis=""), pool
 
-    for t in failures:
-        traj_text = _format_trajectory(t, label="FAIL")
+    # 快照当前 pool 状态，所有并行调用共享同一份上下文
+    pool_snapshot = pool.to_context_str()
+    sys_context = sys_desc.to_context_str()
+    source_code = sys_desc.get_source_context()
 
+    def _diagnose_one(t: Trajectory) -> tuple[Trajectory, list[dict]]:
+        traj_text = _format_trajectory(t, label="FAIL")
         prompt = prompts.SINGLE_ANALYZER_PROMPT.format(
-            system_context=sys_desc.to_context_str(),
-            source_code=sys_desc.get_source_context(),
+            system_context=sys_context,
+            source_code=source_code,
             trajectory=traj_text,
-            pool_context=pool.to_context_str(),
+            pool_context=pool_snapshot,
             past_attempts=past_attempts or "(none)",
         )
-
         resp = llm_call(
             prompt, model=model, max_tokens=4096,
             temperature=0, system=prompts.SINGLE_ANALYZER_SYSTEM,
         )
+        return t, _parse_patterns(resp.text)
 
-        new_patterns = _parse_patterns(resp.text)
-        pool.add(new_patterns, example_question=t.question)
+    # 并行调用 LLM，受 max_concurrency 限制（避免 rate limit）
+    workers = min(max_concurrency, len(failures))
+    log.info("Analyzing %d failures with %d parallel workers", len(failures), workers)
+
+    results: list[tuple[Trajectory, list[dict]]] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_diagnose_one, t): t for t in failures}
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception:
+                t = futures[future]
+                log.warning("Failed to diagnose trajectory: %s", t.question[:60], exc_info=True)
+
+    # 按原始 failure 顺序合并到 pool（保持确定性）
+    order = {id(t): i for i, t in enumerate(failures)}
+    results.sort(key=lambda r: order.get(id(r[0]), 0))
+    for t, patterns in results:
+        pool.add(patterns, example_question=t.question)
 
     # 取 top-N 作为本轮诊断结果
     top_patterns = pool.top_n(top_n)
