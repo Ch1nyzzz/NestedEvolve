@@ -156,6 +156,38 @@ class FailurePool:
                     examples=[q_short] if q_short else [],
                 ))
 
+    def consolidate(self) -> int:
+        """合并池中相似度 >= threshold 的 pattern 对，返回合并次数。
+
+        用于并行诊断后兜底去重：并行调用无法使用 merge_to，
+        可能导致同一 pattern 以不同措辞被分别添加。
+        此方法做一轮贪心合并，将相似条目合并到 count 更高的一方。
+        """
+        merged_count = 0
+        i = 0
+        while i < len(self.patterns):
+            j = i + 1
+            while j < len(self.patterns):
+                if self._similarity(self.patterns[i].pattern, self.patterns[j].pattern) >= self.similarity_threshold:
+                    # 把 j 合并到 i
+                    self.patterns[i].count += self.patterns[j].count
+                    for ex in self.patterns[j].examples:
+                        if ex not in self.patterns[i].examples:
+                            self.patterns[i].examples.append(ex)
+                    if _severity_rank(self.patterns[j].severity) < _severity_rank(self.patterns[i].severity):
+                        self.patterns[i].severity = self.patterns[j].severity
+                    # 保留更长/更详细的 root_cause 和 suggested_fix
+                    if len(self.patterns[j].root_cause) > len(self.patterns[i].root_cause):
+                        self.patterns[i].root_cause = self.patterns[j].root_cause
+                    if len(self.patterns[j].suggested_fix) > len(self.patterns[i].suggested_fix):
+                        self.patterns[i].suggested_fix = self.patterns[j].suggested_fix
+                    self.patterns.pop(j)
+                    merged_count += 1
+                else:
+                    j += 1
+            i += 1
+        return merged_count
+
     def top_n(self, n: int) -> list[dict]:
         """返回出现次数最多的前 n 个 pattern（dict 格式，兼容下游）。"""
         ranked = sorted(self.patterns, key=lambda p: (-p.count, _severity_rank(p.severity)))

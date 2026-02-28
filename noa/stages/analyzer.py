@@ -142,6 +142,11 @@ def analyze_incremental(
     for t, patterns in results:
         pool.add(patterns, example_question=t.question)
 
+    # 并行模式兜底：合并措辞不同但语义相同的 pattern
+    n_merged = pool.consolidate()
+    if n_merged:
+        log.info("Consolidated %d duplicate patterns after parallel merge", n_merged)
+
     # 取 top-N 作为本轮诊断结果
     top_patterns = pool.top_n(top_n)
     summary = "; ".join(
