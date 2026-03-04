@@ -6,3 +6,7 @@ CLAUDE.md
 __pycache__/
 .noa_runs/
 .noa_cache/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
