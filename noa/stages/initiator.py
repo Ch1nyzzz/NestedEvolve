@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 
-from utils.llm import llm_call
+from utils.llm import llm_call, resolve_model
 from noa.core.protocol import SystemDescription, SourceFile
 from noa.core import prompts
 
 
 def initiate(
     source_dir: str,
-    model: str = "gpt-4.1-mini",
+    model: str = resolve_model("gpt-4.1-mini"),
     system_description: str = "",
 ) -> SystemDescription:
     """读取源码 + LLM 内省，返回结构化 SystemDescription。
@@ -21,17 +21,21 @@ def initiate(
     """
     source_files = collect_sources(source_dir)
     source_context = "\n\n".join(
-        f"## File: {sf.path}\n```python\n{sf.content}\n```"
+        f"## File: {sf.path}\n```{'json' if sf.path.endswith('.json') else 'python'}\n{sf.content}\n```"
         for sf in source_files
     )
 
     prompt = prompts.INITIATOR_PROMPT.format(
         source_code=source_context,
         system_description=system_description or "No additional description.",
+        layer_context="",
     )
     resp = llm_call(
-        prompt, model=model, max_tokens=4096,
-        temperature=0, system=prompts.INITIATOR_SYSTEM,
+        prompt,
+        model=model,
+        max_tokens=4096,
+        temperature=0,
+        system=prompts.INITIATOR_SYSTEM,
     )
     parsed = _parse_json(resp.text)
 
@@ -45,12 +49,14 @@ def initiate(
 
 
 def collect_sources(source_dir: str) -> list[SourceFile]:
-    """收集目录下所有 .py 文件（排除 __pycache__ 和 _noa_adapter.py）。"""
+    """收集目录下所有 .py/.json 文件（排除 __pycache__ 和 _noa_adapter.py）。"""
+    _EXTENSIONS = {".py", ".json"}
     source_files = []
     for root, dirs, files in os.walk(source_dir):
         dirs[:] = [d for d in dirs if d != "__pycache__"]
         for fname in sorted(files):
-            if not fname.endswith(".py") or fname == "_noa_adapter.py":
+            ext = os.path.splitext(fname)[1]
+            if ext not in _EXTENSIONS or fname == "_noa_adapter.py":
                 continue
             fpath = os.path.join(root, fname)
             rel = os.path.relpath(fpath, source_dir)
@@ -82,7 +88,7 @@ def _parse_json(text: str) -> dict:
     right = text.rfind("}")
     if left != -1 and right != -1:
         try:
-            return json.loads(text[left:right + 1])
+            return json.loads(text[left : right + 1])
         except json.JSONDecodeError:
             pass
     return {}

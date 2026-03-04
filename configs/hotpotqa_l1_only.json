@@ -15,8 +15,8 @@
     "observer_tool_calls": 8
   },
   "nesting": {
-    "max_depth": 3,
-    "max_spawn_calls": 2
+    "max_depth": 1,
+    "max_spawn_calls": 0
   },
-  "output": null
+  "output": "results_l1.json"
 }

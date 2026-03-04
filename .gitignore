@@ -2,11 +2,33 @@ memory_bank/
 Papers/
 CLAUDE.md
 .DS_Store
+*.log
 .env
 __pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+coverage/
+.mypy_cache/
+.pytest_cache/
 .noa_runs/
 .noa_cache/
 
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Claude Code / Codex / Metaswarm toolchain
+.claude/
+.metaswarm/
+.github/
+.beads/
+.pre-commit-config.yaml
+.coverage-thresholds.json
+.env.example
+SERVICE-INVENTORY.md
+bin/
+scripts/beads-*.ts
+tests/

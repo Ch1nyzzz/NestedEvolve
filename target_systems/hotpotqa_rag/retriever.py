@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,9 @@ def _load_disk_cache() -> None:
 def _save_disk_cache() -> None:
     """将内存缓存写回磁盘。"""
     try:
-        _CACHE_FILE.write_text(json.dumps(_mem_cache, ensure_ascii=False), encoding="utf-8")
+        _CACHE_FILE.write_text(
+            json.dumps(_mem_cache, ensure_ascii=False), encoding="utf-8"
+        )
     except OSError as e:
         print(f"[Cache] 写入磁盘缓存失败: {e}")
 
@@ -59,17 +62,46 @@ class _FakeResponse:
             raise requests.HTTPError(f"Cached response {self.status_code}")
 
 
-def _cached_get(cache_key: tuple, url: str, *, params: dict | None = None,
-                headers: dict | None = None, timeout: int = 10) -> _FakeResponse:
-    """带持久化缓存的 requests.get，命中则直接返回，未命中则请求并存入。"""
+_req_lock = threading.Lock()
+_last_req_time = 0.0
+_MIN_INTERVAL = 0.1  # 100ms 最小请求间隔，防限流
+
+
+def _cached_get(
+    cache_key: tuple,
+    url: str,
+    *,
+    params: dict | None = None,
+    headers: dict | None = None,
+    timeout: int = 10,
+    max_retries: int = 3,
+) -> _FakeResponse:
+    """带持久化缓存的 requests.get，支持重试与限流保护。"""
+    global _last_req_time
     key = str(cache_key)
     if key in _mem_cache:
         sc, body = _mem_cache[key]
         return _FakeResponse(sc, body)
-    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
-    _mem_cache[key] = (resp.status_code, resp.json())
-    _save_disk_cache()
-    return _FakeResponse(resp.status_code, resp.json())
+
+    for attempt in range(max_retries):
+        try:
+            # 线程安全的请求间隔控制
+            with _req_lock:
+                wait = _MIN_INTERVAL - (time.monotonic() - _last_req_time)
+                if wait > 0:
+                    time.sleep(wait)
+                _last_req_time = time.monotonic()
+
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            body = resp.json()
+            _mem_cache[key] = (resp.status_code, body)
+            _save_disk_cache()
+            return _FakeResponse(resp.status_code, body)
+        except (json.JSONDecodeError, requests.RequestException):
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (2**attempt))  # 指数退避: 0.5s, 1s
+                continue
+            raise
 
 
 class ColBERTv2Retriever:
@@ -81,8 +113,7 @@ class ColBERTv2Retriever:
     def retrieve(self, query: str, k: int = 3) -> list[str]:
         try:
             cache_key = ("colbert", self.url, query, k)
-            resp = _cached_get(cache_key, self.url,
-                               params={"query": query, "k": k})
+            resp = _cached_get(cache_key, self.url, params={"query": query, "k": k})
             resp.raise_for_status()
             results = resp.json().get("topk", [])
             return [r.get("text", "") for r in results[:k]]
@@ -116,15 +147,18 @@ class WikipediaRetriever:
     def retrieve(self, query: str, k: int = 3) -> list[str]:
         try:
             cache_key = ("wiki_search", query, k)
-            resp = _cached_get(cache_key, self.API_URL,
-                               params={
-                                   "action": "query",
-                                   "list": "search",
-                                   "srsearch": query,
-                                   "srlimit": k,
-                                   "format": "json",
-                               },
-                               headers=self.HEADERS)
+            resp = _cached_get(
+                cache_key,
+                self.API_URL,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": k,
+                    "format": "json",
+                },
+                headers=self.HEADERS,
+            )
             resp.raise_for_status()
             results = resp.json().get("query", {}).get("search", [])
             return [r.get("snippet", "") for r in results[:k]]
@@ -162,6 +196,7 @@ class WikiSemanticRetriever:
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", n_search: int = 10):
         from sentence_transformers import SentenceTransformer
+
         self.model = SentenceTransformer(model_name)
         self.n_search = n_search
 
@@ -177,15 +212,18 @@ class WikiSemanticRetriever:
     def _search_titles(self, query: str, limit: int) -> list[str]:
         try:
             cache_key = ("wikisem_search", query, limit)
-            resp = _cached_get(cache_key, self.API_URL,
-                               params={
-                                   "action": "query",
-                                   "list": "search",
-                                   "srsearch": query,
-                                   "srlimit": limit,
-                                   "format": "json",
-                               },
-                               headers=self.HEADERS)
+            resp = _cached_get(
+                cache_key,
+                self.API_URL,
+                params={
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": limit,
+                    "format": "json",
+                },
+                headers=self.HEADERS,
+            )
             resp.raise_for_status()
             results = resp.json().get("query", {}).get("search", [])
             return [r["title"] for r in results]
@@ -197,16 +235,19 @@ class WikiSemanticRetriever:
         try:
             titles_key = "|".join(titles)
             cache_key = ("wikisem_extracts", titles_key)
-            resp = _cached_get(cache_key, self.API_URL,
-                               params={
-                                   "action": "query",
-                                   "prop": "extracts",
-                                   "exintro": True,
-                                   "explaintext": True,
-                                   "titles": titles_key,
-                                   "format": "json",
-                               },
-                               headers=self.HEADERS)
+            resp = _cached_get(
+                cache_key,
+                self.API_URL,
+                params={
+                    "action": "query",
+                    "prop": "extracts",
+                    "exintro": True,
+                    "explaintext": True,
+                    "titles": titles_key,
+                    "format": "json",
+                },
+                headers=self.HEADERS,
+            )
             resp.raise_for_status()
             pages = resp.json().get("query", {}).get("pages", {})
             abstracts = []

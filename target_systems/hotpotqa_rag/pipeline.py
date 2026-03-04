@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass, field
 
 from .config import SystemConfig
@@ -24,7 +23,9 @@ class PipelineResult:
 class RAGPipeline:
     """HotpotQA RAG Pipeline — 5 组件顺序执行。"""
 
-    def __init__(self, config: SystemConfig | None = None, corpus: list[str] | None = None):
+    def __init__(
+        self, config: SystemConfig | None = None, corpus: list[str] | None = None
+    ):
         self.config = config or SystemConfig()
         self.corpus = corpus
         self._build_components()
@@ -47,6 +48,12 @@ class RAGPipeline:
             ctx.update(output)
             intermediate[name] = output
 
+        # Propagate ambiguity and retrieval flags through context
+        if "is_ambiguous" not in ctx:
+            ctx["is_ambiguous"] = False
+        if "retrieval_empty" not in ctx:
+            ctx["retrieval_empty"] = False
+
         return PipelineResult(
             answer=ctx.get("answer", ""),
             intermediate=intermediate,
@@ -56,7 +63,11 @@ class RAGPipeline:
         """增量更新配置并重建组件。"""
         cfg_dict = self.config.to_dict()
         for key, val in patch.items():
-            if key in cfg_dict and isinstance(cfg_dict[key], dict) and isinstance(val, dict):
+            if (
+                key in cfg_dict
+                and isinstance(cfg_dict[key], dict)
+                and isinstance(val, dict)
+            ):
                 cfg_dict[key].update(val)
             else:
                 cfg_dict[key] = val

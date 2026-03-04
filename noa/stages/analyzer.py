@@ -6,17 +6,18 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils.llm import llm_call
+from utils.llm import llm_call, resolve_model
 from noa.core.protocol import SystemDescription, Trajectory, Diagnosis, FailurePool
 from noa.core import prompts
 
 log = logging.getLogger(__name__)
+_MIN_ANALYZABLE_INTERMEDIATE_COVERAGE = 0.95
 
 
 def analyze(
     sys_desc: SystemDescription,
     trajectories: list[Trajectory],
-    model: str = "gpt-4.1-mini",
+    model: str = resolve_model("gpt-4.1-mini"),
     failure_threshold: float | None = None,
     past_attempts: str = "",
 ) -> Diagnosis:
@@ -40,16 +41,25 @@ def analyze(
         n_failures=len(failures),
         n_total=len(trajectories),
         trajectories="\n---\n".join(traj_lines) if traj_lines else "(no trajectories)",
+        trajectory_quality=_trajectory_quality_context(trajectories, failures),
         past_attempts=past_attempts or "(none)",
+        layer_context="",
     )
 
     resp = llm_call(
-        prompt, model=model, max_tokens=16384,
-        temperature=0, system=prompts.ANALYZER_SYSTEM,
+        prompt,
+        model=model,
+        max_tokens=16384,
+        temperature=0,
+        system=prompts.ANALYZER_SYSTEM,
     )
 
     patterns = _parse_patterns(resp.text)
-    summary = "; ".join(p.get("pattern", "") for p in patterns[:3]) if patterns else "No patterns found."
+    summary = (
+        "; ".join(p.get("pattern", "") for p in patterns[:3])
+        if patterns
+        else "No patterns found."
+    )
 
     return Diagnosis(
         failure_patterns=patterns,
@@ -66,30 +76,36 @@ def _format_trajectory(t: Trajectory, label: str) -> str:
         f"GT: {t.ground_truth}",
         f"Pred: {t.prediction}",
     ]
+    if t.error:
+        parts.append(f"ERROR: {t.error[:500]}")
+    if not t.intermediate:
+        parts.append("  intermediate: (missing)")
     for comp_name, output in t.intermediate.items():
         if isinstance(output, dict):
             for k, v in output.items():
                 val = str(v)
-                if len(val) > 200:
-                    val = val[:200] + "..."
                 parts.append(f"  {comp_name}.{k}: {val}")
+        else:
+            parts.append(f"  {comp_name}: {str(output)[:500]}")
     return "\n".join(parts)
 
 
 def analyze_incremental(
     sys_desc: SystemDescription,
     trajectories: list[Trajectory],
-    model: str = "gpt-4.1-mini",
+    model: str = resolve_model("gpt-4.1-mini"),
     failure_threshold: float | None = None,
     past_attempts: str = "",
     pool: FailurePool | None = None,
     top_n: int = 5,
     max_concurrency: int = 8,
+    probe=None,
+    max_tool_calls: int = 10,
+    layer_context: str = "",
 ) -> tuple[Diagnosis, FailurePool]:
     """逐条分析失败轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
 
-    所有 failure 共享同一份 pool 快照作为上下文（来自之前 cycle 的积累），
-    LLM 调用通过线程池并行执行，返回后统一合并到 pool。
+    有 probe 时使用 agentic 模式（ReAct 循环 + 工具调用），无 probe 时 fallback 到单次 LLM 调用。
     """
     if pool is None:
         pool = FailurePool()
@@ -100,47 +116,102 @@ def analyze_incremental(
     failures = [t for t in trajectories if t.f1 < failure_threshold]
 
     if not failures:
-        return Diagnosis(failure_patterns=[], summary="No failures.", raw_analysis=""), pool
+        return Diagnosis(
+            failure_patterns=[], summary="No failures.", raw_analysis=""
+        ), pool
 
     # 快照当前 pool 状态，所有并行调用共享同一份上下文
     pool_snapshot = pool.to_context_str()
     sys_context = sys_desc.to_context_str()
     source_code = sys_desc.get_source_context()
+    trajectory_quality = _trajectory_quality_context(trajectories, failures)
 
-    def _diagnose_one(t: Trajectory) -> tuple[Trajectory, list[dict]]:
+    def _diagnose_one_simple(t: Trajectory) -> tuple[Trajectory, list[dict]]:
+        """Fallback：单次 LLM 调用（无 probe）。"""
         traj_text = _format_trajectory(t, label="FAIL")
         prompt = prompts.SINGLE_ANALYZER_PROMPT.format(
             system_context=sys_context,
             source_code=source_code,
             trajectory=traj_text,
+            trajectory_quality=trajectory_quality,
             pool_context=pool_snapshot,
             past_attempts=past_attempts or "(none)",
+            layer_context=layer_context,
         )
         resp = llm_call(
-            prompt, model=model, max_tokens=4096,
-            temperature=0, system=prompts.SINGLE_ANALYZER_SYSTEM,
+            prompt,
+            model=model,
+            max_tokens=4096,
+            temperature=0,
+            system=prompts.SINGLE_ANALYZER_SYSTEM,
         )
         return t, _parse_patterns(resp.text)
 
+    def _diagnose_one_agentic(t: Trajectory) -> tuple[Trajectory, list[dict]]:
+        """Agentic 模式：ReAct 循环 + 工具调用。"""
+        from noa.stages.agentic import agentic_loop
+
+        traj_text = _format_trajectory(t, label="FAIL")
+        user_content = prompts.AGENTIC_ANALYZER_PROMPT.format(
+            system_context=sys_context,
+            source_code=source_code,
+            trajectory=traj_text,
+            trajectory_quality=trajectory_quality,
+            pool_context=pool_snapshot,
+            past_attempts=past_attempts or "(none)",
+            layer_context=layer_context,
+        )
+        messages = [
+            {"role": "system", "content": prompts.AGENTIC_ANALYZER_SYSTEM},
+            {"role": "user", "content": user_content},
+        ]
+        tools = probe.get_tool_schemas()
+
+        final_text = agentic_loop(
+            messages=messages,
+            tools=tools,
+            tool_executor=probe.execute_tool,
+            model=model,
+            max_tool_calls=max_tool_calls,
+            parse_fn=lambda text: _parse_patterns(text) or None,
+            json_retries=2,
+            budget_exhausted_prompt="Tool call budget exhausted. Output your diagnosis now as JSON.",
+            invalid_json_prompt="Your last response was not valid JSON list of patterns. Output ONLY valid JSON now.",
+        )
+        return t, _parse_patterns(final_text)
+
+    diagnose_fn = _diagnose_one_agentic if probe is not None else _diagnose_one_simple
+    mode_label = "agentic" if probe is not None else "simple"
+
     # 并行调用 LLM，受 max_concurrency 限制（避免 rate limit）
     workers = min(max_concurrency, len(failures))
-    log.info("Analyzing %d failures with %d parallel workers", len(failures), workers)
+    log.info(
+        "Analyzing %d failures with %d parallel workers (%s mode)",
+        len(failures),
+        workers,
+        mode_label,
+    )
 
     results: list[tuple[Trajectory, list[dict]]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_diagnose_one, t): t for t in failures}
+        futures = {executor.submit(diagnose_fn, t): t for t in failures}
         for future in as_completed(futures):
             try:
                 results.append(future.result())
             except Exception:
                 t = futures[future]
-                log.warning("Failed to diagnose trajectory: %s", t.question[:60], exc_info=True)
+                log.warning(
+                    "Failed to diagnose trajectory: %s", t.question[:60], exc_info=True
+                )
 
     # 按原始 failure 顺序合并到 pool（保持确定性）
     order = {id(t): i for i, t in enumerate(failures)}
     results.sort(key=lambda r: order.get(id(r[0]), 0))
     for t, patterns in results:
         pool.add(patterns, example_question=t.question)
+    obs_gap = _observability_gap_pattern(trajectories, failures)
+    if obs_gap is not None:
+        pool.add([obs_gap], example_question="(observer data quality)")
 
     # 并行模式兜底：合并措辞不同但语义相同的 pattern
     n_merged = pool.consolidate()
@@ -149,49 +220,87 @@ def analyze_incremental(
 
     # 取 top-N 作为本轮诊断结果
     top_patterns = pool.top_n(top_n)
-    summary = "; ".join(
-        f"{p['pattern']} (x{p['count']})" for p in top_patterns[:3]
-    ) if top_patterns else "No patterns found."
+    summary = (
+        "; ".join(f"{p['pattern']} (x{p['count']})" for p in top_patterns[:3])
+        if top_patterns
+        else "No patterns found."
+    )
 
-    log.info("FailurePool: %d unique patterns from %d failures, top-%d selected",
-             len(pool), len(failures), min(top_n, len(pool)))
+    log.info(
+        "FailurePool: %d unique patterns from %d failures, top-%d selected",
+        len(pool),
+        len(failures),
+        min(top_n, len(pool)),
+    )
 
     return Diagnosis(
         failure_patterns=top_patterns,
         summary=summary,
-        raw_analysis=f"Pool size: {len(pool)}, top {top_n} selected.",
+        raw_analysis=f"Pool size: {len(pool)}, top {top_n} selected. Mode: {mode_label}.",
     ), pool
 
 
-def meta_analyze(
-    sys_desc: SystemDescription,
-    l1_history: list[dict],
-    model: str = "gpt-4.1-mini",
-    past_attempts: str = "",
-) -> Diagnosis:
-    """L2 专用：直接分析 L1 运行历史，不需要重新 Observe。"""
-    prompt = prompts.L2_META_ANALYZER_PROMPT.format(
-        source_code=sys_desc.get_source_context(),
-        l1_history=_format_l1_history(l1_history),
-        past_attempts=past_attempts or "(none)",
+def _trajectory_quality_context(
+    trajectories: list[Trajectory], failures: list[Trajectory]
+) -> str:
+    total = len(trajectories)
+    fail_n = len(failures)
+    total_with = sum(
+        1
+        for t in trajectories
+        if isinstance(t.intermediate, dict) and bool(t.intermediate)
     )
-
-    resp = llm_call(
-        prompt, model=model, max_tokens=16384,
-        temperature=0, system=prompts.L2_META_ANALYZER_SYSTEM,
+    fail_with = sum(
+        1 for t in failures if isinstance(t.intermediate, dict) and bool(t.intermediate)
     )
-
-    patterns = _parse_patterns(resp.text)
-    summary = "; ".join(p.get("pattern", "") for p in patterns[:3]) if patterns else "No patterns found."
-
-    return Diagnosis(
-        failure_patterns=patterns,
-        summary=summary,
-        raw_analysis=resp.text,
+    total_cov = (total_with / total) if total else 0.0
+    fail_cov = (fail_with / fail_n) if fail_n else 0.0
+    return (
+        f"- total trajectories: {total}\n"
+        f"- trajectories with intermediate: {total_with} ({total_cov:.1%})\n"
+        f"- failure trajectories: {fail_n}\n"
+        f"- failures with intermediate: {fail_with} ({fail_cov:.1%})\n"
+        "- note: low intermediate coverage means root-cause localization is under-observed."
     )
 
 
-def _format_l1_history(l1_history: list[dict]) -> str:
+def _observability_gap_pattern(
+    trajectories: list[Trajectory], failures: list[Trajectory]
+) -> dict | None:
+    if not trajectories:
+        return None
+    with_intermediate = sum(
+        1
+        for t in trajectories
+        if isinstance(t.intermediate, dict) and bool(t.intermediate)
+    )
+    coverage = with_intermediate / len(trajectories)
+    if coverage >= _MIN_ANALYZABLE_INTERMEDIATE_COVERAGE:
+        return None
+    missing_failures = sum(
+        1
+        for t in failures
+        if not (isinstance(t.intermediate, dict) and bool(t.intermediate))
+    )
+    return {
+        "pattern": "Trajectory reuse has incomplete component evidence (missing intermediate)",
+        "root_cause": (
+            "A substantial portion of trajectories lacks component-level intermediate outputs. "
+            "Without boundary evidence, diagnosis degenerates into output-text guesses."
+        ),
+        "affected_component": "Observer data reuse / analyzer evidence pipeline",
+        "severity": "high",
+        "affected_file": "noa/stages/observer.py",
+        "suggested_fix": (
+            "Replay or top-up reused trajectories until intermediate coverage is high before proposing patches."
+        ),
+        "count": max(1, missing_failures),
+        "evidence": f"intermediate coverage={coverage:.1%}, missing_failure_samples={missing_failures}",
+        "confidence": 0.95,
+    }
+
+
+def format_parent_history(l1_history: list[dict]) -> str:
     """将 L1 history 列表格式化为 LLM 可读文本。"""
     if not l1_history:
         return "(no L1 history)"
@@ -204,6 +313,18 @@ def _format_l1_history(l1_history: list[dict]) -> str:
         parts.append(header)
         parts.append(f"Diagnosis: {h.get('diagnosis', 'N/A')}")
         parts.append(f"Rationale: {h.get('rationale', 'N/A')}")
+
+        eval_error = h.get("eval_error")
+        if eval_error:
+            parts.append(f"Eval Error: {eval_error[:300]}")
+        eval_details = h.get("eval_details", [])
+        low_score = [d for d in eval_details if d.get("f1", 1) < 0.5][:3]
+        if low_score:
+            parts.append("Low-score samples:")
+            for s in low_score:
+                parts.append(
+                    f"  Q: {s.get('question', '?')[:80]} | F1={s.get('f1', '?')}"
+                )
 
         diffs = h.get("diffs", [])
         for d in diffs:
@@ -227,16 +348,36 @@ def _parse_patterns(text: str) -> list[dict]:
     try:
         result = json.loads(text)
         if isinstance(result, list):
-            return result
+            return _normalize_patterns(result)
     except json.JSONDecodeError:
         pass
     left = text.find("[")
     right = text.rfind("]")
     if left != -1 and right != -1:
         try:
-            result = json.loads(text[left:right + 1])
+            result = json.loads(text[left : right + 1])
             if isinstance(result, list):
-                return result
+                return _normalize_patterns(result)
         except json.JSONDecodeError:
             pass
     return []
+
+
+def _normalize_patterns(patterns: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for p in patterns:
+        if not isinstance(p, dict):
+            continue
+        item = dict(p)
+        if "confidence" not in item:
+            item["confidence"] = 0.5
+        else:
+            try:
+                item["confidence"] = max(0.0, min(1.0, float(item["confidence"])))
+            except Exception:
+                item["confidence"] = 0.5
+        if "evidence" not in item:
+            evidence = item.get("root_cause") or item.get("suggested_fix") or ""
+            item["evidence"] = str(evidence)[:300]
+        normalized.append(item)
+    return normalized

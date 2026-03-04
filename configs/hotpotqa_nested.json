@@ -7,16 +7,17 @@
     "max_steps": 20,
     "n_samples": 50,
     "eval_n_samples": 20,
-    "model": "gpt-4.1-mini",
+    "model": "claude-haiku-4-5-20251001",
     "max_llm_calls": 80,
     "max_evals": 12,
     "max_no_improve_steps": 5,
     "max_tool_calls": 10,
-    "observer_tool_calls": 8
+    "observer_tool_calls": 8,
+    "optimizer_tool_calls": 5
   },
   "nesting": {
     "max_depth": 3,
     "max_spawn_calls": 2
   },
-  "output": null
+  "output": "results_nested.json"
 }

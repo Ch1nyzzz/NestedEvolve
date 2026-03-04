@@ -1,70 +1,87 @@
-"""Orchestrator — L1+L2 自主嵌套优化编排器。
-
-运行 L1 后自动启动 L2（meta-optimizer），
-L2 直接消费 L1 运行历史，仅在 Evaluate 阶段运行 mini L1 验证 patch。
-"""
+"""Orchestrator — workspace 管理 + NOptimizer 薄入口，递归由 spawn_sublayer 驱动。"""
 
 from __future__ import annotations
 
 import os
 from types import SimpleNamespace
 
-from noa.engine import _format_history, _sort_patterns_by_severity
-from noa.core.protocol import SystemDescription, Diagnosis
-from noa.stages.initiator import collect_sources
-from noa.stages.analyzer import meta_analyze, _format_l1_history
-from noa.stages.optimizer import optimize
-from noa.stages.evaluator import evaluate
-from noa.subprocess_runner import run_l1_subprocess, serialize_dataset
+from noa.core.protocol import LayerContext
+from noa.engine import NOptimizer
+from noa.subprocess_runner import run_layer_subprocess, serialize_dataset
 from noa.workspace import WorkspaceManager
+from utils.llm import resolve_model
 
 
-class L1Target:
-    """L2 的 "target" — 调用时在 subprocess 中运行 L1。"""
+class SubprocessTarget:
+    """通用子进程目标包装 — 服务任意层级的评估。"""
 
     def __init__(
         self,
         noa_dir: str,
         project_root: str,
-        l0_source_dir: str,
+        target_source_dir: str,
         dataset_pickle_path: str,
-        iterations: int,
-        n_samples: int,
-        model: str,
+        layer_level: int = 1,
+        max_steps: int = 20,
+        n_samples: int = 20,
+        model: str = resolve_model("gpt-4.1-mini"),
         eval_n_samples: int = 20,
+        max_llm_calls: int = 80,
+        max_evals: int = 12,
+        max_no_improve_steps: int = 5,
+        max_tool_calls: int = 10,
+        observer_tool_calls: int = 8,
     ):
         self.noa_dir = noa_dir
         self.project_root = project_root
-        self.l0_source_dir = l0_source_dir
+        self.target_source_dir = target_source_dir
         self.dataset_pickle_path = dataset_pickle_path
-        self.iterations = iterations
+        self.layer_level = layer_level
+        self.max_steps = max_steps
         self.n_samples = n_samples
         self.model = model
         self.eval_n_samples = eval_n_samples
+        self.max_llm_calls = max_llm_calls
+        self.max_evals = max_evals
+        self.max_no_improve_steps = max_no_improve_steps
+        self.max_tool_calls = max_tool_calls
+        self.observer_tool_calls = observer_tool_calls
 
     def __call__(self, question: str) -> SimpleNamespace:
-        """question 被忽略，仅作触发。返回 L1 运行结果。"""
-        result = run_l1_subprocess(
+        result = run_layer_subprocess(
             noa_dir=self.noa_dir,
             project_root=self.project_root,
-            l0_source_dir=self.l0_source_dir,
+            target_source_dir=self.target_source_dir,
             dataset_pickle_path=self.dataset_pickle_path,
-            iterations=self.iterations,
+            layer_level=self.layer_level,
+            max_steps=self.max_steps,
             n_samples=self.n_samples,
             eval_n_samples=self.eval_n_samples,
             model=self.model,
-            isolate_source=True,  # L2 调用 L1 时必须隔离，避免 L1 patch 污染共享 target 代码
+            max_llm_calls=self.max_llm_calls,
+            max_evals=self.max_evals,
+            max_no_improve_steps=self.max_no_improve_steps,
+            max_tool_calls=self.max_tool_calls,
+            observer_tool_calls=self.observer_tool_calls,
+            isolate_source=True,
         )
         if result.get("error"):
-            print(f"[L1Target] L1 subprocess error: {result['error'][:200]}")
+            print(f"[SubprocessTarget] subprocess error: {result['error'][:200]}")
         return SimpleNamespace(
-            answer=str(result.get("final_score", 0)),
-            intermediate=result,
+            answer=str(result.get("final_score", 0)), intermediate=result
         )
+
+
+# Backward compatibility alias
+L1Target = SubprocessTarget
 
 
 class Orchestrator:
-    """薄层编排器 — 运行 L1 后判断是否升级到 L2。"""
+    """简化的嵌套优化器入口 — workspace 管理 + L1 NOptimizer 启动。
+
+    递归嵌套由 NOptimizer planner 的 spawn_sublayer action 驱动，
+    不再硬编码 L1/L2 调度。
+    """
 
     def __init__(
         self,
@@ -74,14 +91,33 @@ class Orchestrator:
         eval_fn,
         score_fn,
         *,
-        l1_max_iterations: int = 5,
+        # L1 参数
+        l1_max_steps: int = 20,
         l1_n_samples: int = 20,
         l1_eval_n_samples: int = 20,
-        l1_model: str = "gpt-4.1-mini",
-        l2_max_iterations: int = 3,
+        l1_model: str = resolve_model("gpt-4.1-mini"),
+        l1_max_llm_calls: int = 80,
+        l1_max_evals: int = 12,
+        l1_max_no_improve_steps: int = 5,
+        l1_max_tool_calls: int = 10,
+        l1_observer_tool_calls: int = 8,
+        l1_optimizer_tool_calls: int = 5,
+        # 递归参数
+        max_depth: int = 3,
+        max_spawn_calls: int = 2,
+        # 兼容旧参数（忽略）
+        l2_max_steps: int = 12,
         l2_n_samples: int | None = None,
-        l2_model: str = "gpt-4.1-mini",
+        l2_model: str = resolve_model("gpt-4.1-mini"),
+        l2_max_llm_calls: int = 60,
+        l2_max_evals: int = 8,
+        l2_max_no_improve_steps: int = 4,
+        l2_observer_tool_calls: int = 8,
         max_l2_rounds: int = 2,
+        max_l1_rounds: int | None = None,
+        orchestrator_model: str | None = None,
+        orchestrator_max_llm_calls: int = 24,
+        max_orchestrator_steps: int | None = None,
     ):
         self.source_dir = os.path.abspath(source_dir)
         self.target_factory = target_factory
@@ -89,247 +125,101 @@ class Orchestrator:
         self.eval_fn = eval_fn
         self.score_fn = score_fn
 
-        self.l1_max_iterations = l1_max_iterations
+        self.l1_max_steps = l1_max_steps
         self.l1_n_samples = l1_n_samples
         self.l1_eval_n_samples = l1_eval_n_samples
         self.l1_model = l1_model
+        self.l1_max_llm_calls = l1_max_llm_calls
+        self.l1_max_evals = l1_max_evals
+        self.l1_max_no_improve_steps = l1_max_no_improve_steps
+        self.l1_max_tool_calls = l1_max_tool_calls
+        self.l1_observer_tool_calls = l1_observer_tool_calls
+        self.l1_optimizer_tool_calls = l1_optimizer_tool_calls
 
-        self.l2_max_iterations = l2_max_iterations
-        self.l2_n_samples = l2_n_samples if l2_n_samples is not None else 1
-        self.l2_model = l2_model
-        self.max_l2_rounds = max_l2_rounds
+        self.max_depth = max_depth
+        self.max_spawn_calls = max_spawn_calls
 
-        # 推导项目根目录和 noa 目录
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.noa_dir = os.path.join(self.project_root, "noa")
-
-        # 序列化 dataset（复用）
         cache_dir = os.path.join(self.project_root, ".noa_cache")
         self.dataset_pickle_path = serialize_dataset(dataset, cache_dir=cache_dir)
 
     def run(self) -> dict:
-        """执行 L1+L2 嵌套优化，返回最终结果。
-
-        原始代码不可变 — 所有修改在 workspace 副本上进行。
-        """
-        # 创建 workspace，复制原始代码
         ws = WorkspaceManager(self.project_root, self.source_dir)
         ws_noa, ws_source = ws.setup()
-        self._ws_noa = ws_noa
-        self._ws_source = ws_source
+        print(f"[Orchestrator] Workspace ready: {ws.run_dir}")
 
-        print(f"[Orchestrator] Workspace 创建完成: {ws.run_dir}")
+        rounds = []
 
-        all_rounds: list[dict] = []
+        # Round 0: in-process L1
+        layer_context = LayerContext(
+            layer_id="L1",
+            level=1,
+            writable_root=ws_source,
+            readable_roots=[ws_source],
+            parent_history=[],
+            max_depth=self.max_depth,
+            max_spawn_calls=self.max_spawn_calls,
+        )
 
-        for round_idx in range(1 + self.max_l2_rounds):
-            print(f"\n{'='*60}")
-            print(f"[Orchestrator] Round {round_idx} — 运行 L1")
-            print(f"{'='*60}")
-
-            l1_result = self._run_l1_subprocess()
-            all_rounds.append({"round": round_idx, "l1_result": l1_result})
-            ws.snapshot(f"after_l1_round_{round_idx}")
-
-            print(f"[Orchestrator] L1 结果: baseline={l1_result.get('baseline_score', '?')}, "
-                  f"final={l1_result.get('final_score', '?')}, "
-                  f"accepted={l1_result.get('accepted', '?')}/{l1_result.get('iterations', '?')}")
-
-            if l1_result.get("error"):
-                print(f"[Orchestrator] L1 出错: {l1_result['error'][:200]}")
-
-            # 最后一轮不再升级
-            if round_idx >= self.max_l2_rounds:
-                break
-
-            print(f"\n{'='*60}")
-            print(f"[Orchestrator] L1 已饱和 — 启动 L2 Meta-Optimizer")
-            print(f"{'='*60}")
-
-            l2_result = self._run_l2(l1_result)
-            all_rounds[-1]["l2_result"] = l2_result
-            ws.snapshot(f"after_l2_round_{round_idx}")
-
-        final_result = all_rounds[-1]["l1_result"]
-        print(f"\n[Orchestrator] 原始代码未修改")
-        print(f"[Orchestrator] 快照目录: {ws.run_dir}")
-        return {
-            "final_score": final_result.get("final_score", 0),
-            "baseline_score": all_rounds[0]["l1_result"].get("baseline_score", 0),
-            "rounds": all_rounds,
-            "total_rounds": len(all_rounds),
-            "run_dir": ws.run_dir,
-            "snapshots": ws.list_snapshots(),
-        }
-
-    def _run_l1_subprocess(self) -> dict:
-        """在 subprocess 中运行 L1（使用 workspace 副本）。"""
-        return run_l1_subprocess(
-            noa_dir=self._ws_noa,
-            project_root=self.project_root,
-            l0_source_dir=self._ws_source,
-            dataset_pickle_path=self.dataset_pickle_path,
-            iterations=self.l1_max_iterations,
+        optimizer = NOptimizer(
+            source_dir=ws_source,
+            target_factory=self.target_factory,
+            dataset=self.dataset,
+            eval_fn=self.eval_fn,
+            max_steps=self.l1_max_steps,
             n_samples=self.l1_n_samples,
             eval_n_samples=self.l1_eval_n_samples,
             model=self.l1_model,
+            score_fn=self.score_fn,
+            max_llm_calls=self.l1_max_llm_calls,
+            max_evals=self.l1_max_evals,
+            max_no_improve_steps=self.l1_max_no_improve_steps,
+            max_tool_calls=self.l1_max_tool_calls,
+            observer_max_tool_calls=self.l1_observer_tool_calls,
+            optimizer_max_tool_calls=self.l1_optimizer_tool_calls,
+            layer_context=layer_context,
+            noa_dir=ws_noa,
+            dataset_pickle_path=self.dataset_pickle_path,
         )
+        result = optimizer.run()
+        ws.snapshot("after_round_0")
+        rounds.append({"round": 0, "l1_result": result})
 
-    def _run_l2(self, l1_result: dict) -> dict:
-        """运行 L2 meta-optimizer：直接分析 L1 历史，跳过 Initiate/Observe。"""
-        l1_history = l1_result.get("history", [])
-
-        # 1. 收集 noa/ 源码
-        source_files = collect_sources(self._ws_noa)
-
-        # 2. 构建 SystemDescription（不调用 LLM，不运行 L1）
-        sys_desc = SystemDescription(
-            workflow_summary="NOA I-O-A-O-E optimizer loop: Initiate → Observe → Analyze → Optimize → Evaluate",
-            component_names=["initiator", "observer", "analyzer", "optimizer", "evaluator"],
-            source_files=source_files,
-            source_dir=self._ws_noa,
-            baseline_score=l1_result.get("final_score", 0),
-        )
-
-        # 3. L2 target_factory + eval_fn（仅 Evaluate 阶段用，跑完整 L1）
-        project_root = self.project_root
-        l0_source_dir = self._ws_source
-        dataset_pickle = self.dataset_pickle_path
-        l1_iters = self.l1_max_iterations
-        l1_samples = self.l1_n_samples
-        model = self.l2_model
-
-        l1_eval_samples = self.l1_eval_n_samples
-
-        def l2_target_factory(noa_dir: str) -> L1Target:
-            return L1Target(
-                noa_dir=noa_dir,
-                project_root=project_root,
-                l0_source_dir=l0_source_dir,
-                dataset_pickle_path=dataset_pickle,
-                iterations=l1_iters,
-                n_samples=l1_samples,
-                model=model,
-                eval_n_samples=l1_eval_samples,
+        # Subsequent rounds: subprocess L1 restart after spawn_sublayer modified noa/
+        round_num = 1
+        while result.get("spawn_restart") and round_num <= self.max_spawn_calls:
+            print(
+                f"\n[Orchestrator] === Round {round_num}: Restarting L1 via subprocess (noa/ modified) ==="
             )
+            result = run_layer_subprocess(
+                noa_dir=ws_noa,
+                project_root=self.project_root,
+                target_source_dir=ws_source,
+                dataset_pickle_path=self.dataset_pickle_path,
+                layer_level=1,
+                max_steps=self.l1_max_steps,
+                n_samples=self.l1_n_samples,
+                eval_n_samples=self.l1_eval_n_samples,
+                model=self.l1_model,
+                max_llm_calls=self.l1_max_llm_calls,
+                max_evals=self.l1_max_evals,
+                max_no_improve_steps=self.l1_max_no_improve_steps,
+                max_tool_calls=self.l1_max_tool_calls,
+                observer_tool_calls=self.l1_observer_tool_calls,
+            )
+            ws.snapshot(f"after_round_{round_num}")
+            rounds.append({"round": round_num, "l1_result": result})
+            round_num += 1
 
-        l2_n = self.l2_n_samples  # 默认 1
-        l2_dataset = [
-            SimpleNamespace(question="run_l1", answer="100", id=f"l1_eval_{i}")
-            for i in range(l2_n)
-        ]
-
-        def l2_eval_fn(target, dataset_subset):
-            scores = []
-            for item in dataset_subset:
-                result = target(item.question)
-                scores.append(result.intermediate.get("final_score", 0))
-            return {"score": sum(scores) / len(scores) if scores else 0}
-
-        # 4. 循环：meta_analyze → 逐个 pattern optimize → evaluate
-        print(f"[Orchestrator] L2 开始 meta-optimize noa/ 代码 (max_iterations={self.l2_max_iterations})")
-        baseline = l1_result.get("final_score", 0)
-        l2_history: list[dict] = []
-        consecutive_no_accept_cycles = 0
-        accepted_count = 0
-
-        for i in range(self.l2_max_iterations):
-            print(f"\n[L2] === Cycle {i+1}/{self.l2_max_iterations} ===")
-
-            # 刷新源码
-            sys_desc.source_files = collect_sources(self._ws_noa)
-
-            # --- Meta-Analyze（0 次 L1 调用）---
-            print(f"[L2] Meta-analyzing L1 history...")
-            past = _format_history(l2_history)
-            diagnosis = meta_analyze(sys_desc, l1_history, model=self.l2_model, past_attempts=past)
-            print(f"[L2] Diagnosis: {diagnosis.summary}")
-
-            if not diagnosis.failure_patterns:
-                consecutive_no_accept_cycles += 1
-                print(f"[L2] No patterns found ({consecutive_no_accept_cycles}/2).")
-                if consecutive_no_accept_cycles >= 2:
-                    print(f"[L2] Stopping (2 consecutive cycles with no progress).")
-                    break
-                continue
-
-            # --- 逐个 pattern 优化 ---
-            sorted_patterns = _sort_patterns_by_severity(diagnosis.failure_patterns)
-            cycle_accepted = False
-
-            for p_idx, pattern in enumerate(sorted_patterns):
-                pat_name = pattern.get("pattern", "unknown")
-                pat_severity = pattern.get("severity", "?")
-                print(f"\n[L2]   --- Pattern {p_idx+1}/{len(sorted_patterns)}: [{pat_severity}] {pat_name} ---")
-
-                single_diagnosis = Diagnosis(
-                    failure_patterns=[pattern],
-                    summary=pat_name,
-                    raw_analysis=diagnosis.raw_analysis,
-                )
-
-                # --- Optimize（0 次 L1 调用）---
-                past = _format_history(l2_history)
-                print(f"[L2]   Generating patch for pattern: {pat_name}...")
-                patch = optimize(sys_desc, single_diagnosis, model=self.l2_model, past_attempts=past)
-                print(f"[L2]   Diffs: {len(patch.diffs)} blocks")
-                print(f"[L2]   Rationale: {patch.rationale}")
-
-                if not patch.diffs:
-                    print(f"[L2]   Empty patch, skipping pattern.")
-                    continue
-
-                # --- Evaluate（运行完整 L1 验证）---
-                print(f"[L2]   Evaluating patch (running full L1)...")
-                result = evaluate(
-                    source_files=sys_desc.source_files,
-                    source_dir=self._ws_noa,
-                    patch=patch,
-                    dataset=l2_dataset,
-                    eval_fn=l2_eval_fn,
-                    target_factory=l2_target_factory,
-                    baseline_score=baseline,
-                    n_samples=l2_n,
-                    seed=43,
-                )
-
-                status = "ACCEPTED" if result.accepted else "REJECTED"
-                print(f"[L2]   {status}: {result.before_score:.2f} -> {result.after_score:.2f}")
-
-                l2_history.append({
-                    "iteration": i + 1,
-                    "pattern": pat_name,
-                    "severity": pat_severity,
-                    "diagnosis": single_diagnosis.summary,
-                    "diffs": patch.diffs,
-                    "rationale": patch.rationale,
-                    "before": result.before_score,
-                    "after": result.after_score,
-                    "accepted": result.accepted,
-                })
-
-                if result.accepted:
-                    baseline = result.after_score
-                    accepted_count += 1
-                    cycle_accepted = True
-                    # 刷新源码
-                    sys_desc.source_files = collect_sources(self._ws_noa)
-
-            if cycle_accepted:
-                consecutive_no_accept_cycles = 0
-            else:
-                consecutive_no_accept_cycles += 1
-                if consecutive_no_accept_cycles >= 2:
-                    print(f"[L2] Stopping (2 consecutive cycles with no accepted patch).")
-                    break
-
-        print(f"\n[Orchestrator] L2 完成: final_score={baseline:.2f}, "
-              f"accepted={accepted_count}/{len(l2_history)}")
-
+        # 取最后一轮的分数
+        last = rounds[-1]["l1_result"]
         return {
-            "final_score": baseline,
-            "baseline_score": l1_result.get("final_score", 0),
-            "iterations": len(l2_history),
-            "accepted": accepted_count,
-            "history": l2_history,
+            "final_score": last.get("final_score", 0),
+            "baseline_score": rounds[0]["l1_result"].get("baseline_score", 0),
+            "rounds": rounds,
+            "total_rounds": len(rounds),
+            "schedule_trace": [],
+            "orchestrator_usage": {},
+            "run_dir": ws.run_dir,
+            "snapshots": ws.list_snapshots(),
         }

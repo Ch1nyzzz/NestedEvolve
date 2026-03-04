@@ -1,30 +1,39 @@
-"""NOptimizer — I-O-A-O-E 闭环编排器。"""
+"""NOptimizer — planner-driven L1 optimizer (no fixed workflow fallback)."""
 
 from __future__ import annotations
 
+import os
+from dataclasses import asdict
 from typing import Callable
 
-from noa.core.protocol import SystemDescription, Diagnosis, EvalResult, FailurePool
-from noa.stages.initiator import initiate, collect_sources
-from noa.stages.observer import observe
-from noa.stages.analyzer import analyze, analyze_incremental
-from noa.stages.optimizer import optimize
-from noa.stages.evaluator import evaluate
+from noa.core.protocol import LayerContext, SystemDescription
+from noa.planner.agent import PlannerAgent
+from noa.planner.executors import ActionExecutor
+from noa.planner.guardrails import validate_decision
+from noa.planner.protocol import (
+    PlannerBudget,
+    PlannerDecision,
+    PlannerState,
+    PlannerStepRecord,
+)
+from noa.planner.reducer import apply_result, should_stop
+from noa.planner.trace import PlannerTraceWriter
+from noa.stages.initiator import initiate
+from utils.llm import resolve_model
 
 
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
 def _sort_patterns_by_severity(patterns: list[dict]) -> list[dict]:
-    """按 severity 降序排列 failure patterns（high > medium > low）。"""
-    return sorted(patterns, key=lambda p: _SEVERITY_ORDER.get(p.get("severity", "low"), 2))
+    """Utility kept for compatibility in external imports."""
+    return sorted(
+        patterns, key=lambda p: _SEVERITY_ORDER.get(p.get("severity", "low"), 2)
+    )
 
 
 class NOptimizer:
-    """嵌套优化器，编排 Initiate -> Observe -> Analyze -> Optimize -> Evaluate 循环。
-
-    自身也暴露 __call__ 接口，让 L2 可以以 noa/ 为 source_dir 优化 L1。
-    """
+    """Planner-driven nested optimizer for L1 target systems."""
 
     def __init__(
         self,
@@ -33,34 +42,67 @@ class NOptimizer:
         dataset: list,
         eval_fn,
         *,
-        max_iterations: int = 5,
+        max_steps: int = 20,
+        max_iterations: int | None = None,  # legacy alias, mapped to max_steps
         n_samples: int = 20,
         eval_n_samples: int = 20,
-        model: str = "gpt-4.1-mini",
+        model: str = resolve_model("gpt-4.1-mini"),
+        planner_model: str | None = None,
         system_description: str = "",
         score_fn,
         failure_threshold: float | None = None,
+        max_tool_calls: int = 10,
+        observer_max_tool_calls: int = 8,
+        optimizer_max_tool_calls: int = 5,
+        planner_budget: PlannerBudget | None = None,
+        max_llm_calls: int = 80,
+        max_evals: int = 12,
+        max_no_improve_steps: int = 5,
+        layer_context: LayerContext | None = None,
+        observer_search_roots: list[str] | None = None,
+        noa_dir: str | None = None,
+        dataset_pickle_path: str | None = None,
     ):
         self.source_dir = source_dir
         self.target_factory = target_factory
         self.dataset = dataset
         self.eval_fn = eval_fn
-        self.max_iterations = max_iterations
         self.n_samples = n_samples
         self.eval_n_samples = eval_n_samples
         self.model = model
+        self.planner_model = planner_model or model
         self.system_description = system_description
         self.score_fn = score_fn
         self.failure_threshold = failure_threshold
+        self.max_tool_calls = max_tool_calls
+        self.observer_max_tool_calls = observer_max_tool_calls
+        self.optimizer_max_tool_calls = optimizer_max_tool_calls
+
+        effective_steps = max_iterations if max_iterations is not None else max_steps
+        if planner_budget is None:
+            max_spawn = layer_context.max_spawn_calls if layer_context else 2
+            planner_budget = PlannerBudget(
+                max_steps=effective_steps,
+                max_llm_calls=max_llm_calls,
+                max_evals=max_evals,
+                max_no_improve_steps=max_no_improve_steps,
+                target_delta=float("inf"),
+                max_spawn_calls=max_spawn,
+            )
+        self.planner_budget = planner_budget
+        self.layer_context = layer_context
+        self.observer_search_roots = observer_search_roots
+        self.noa_dir = noa_dir
+        self.dataset_pickle_path = dataset_pickle_path
 
         self.target = target_factory(source_dir)
-        self.history: list[dict] = []
         self.sys_desc: SystemDescription | None = None
+        self.history: list[dict] = []
+        self._project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def run(self) -> dict:
-        """执行完整 I-O-A-O-E 循环，返回优化结果。"""
-        # --- Initiate（LLM 内省，不跑 baseline）---
-        print(f"\n[NOA] === Initiate ===")
+        """Run L1 planner loop and return optimization result."""
+        print("\n[NOA] === Initiate ===")
         self.sys_desc = initiate(
             source_dir=self.source_dir,
             model=self.model,
@@ -69,198 +111,135 @@ class NOptimizer:
         print(f"[NOA] Workflow: {self.sys_desc.workflow_summary}")
         print(f"[NOA] Source files: {len(self.sys_desc.source_files)}")
 
-        # --- 首次 Observe：既算 baseline，又作为第一轮 Analyze 的输入 ---
-        print(f"[NOA] Initial observe ({self.n_samples} samples)...")
-        init_trajectories = observe(
-            self.target, self.dataset, self.n_samples,
-            seed=43, score_fn=self.score_fn,  # seed=43 与 Evaluator 一致
+        layer_label = f"l{self.layer_context.level}" if self.layer_context else "l1"
+        state = PlannerState(
+            layer=layer_label,
+            budget=PlannerBudget(**asdict(self.planner_budget)),
+            baseline_score=0.0,
+            current_score=0.0,
+            layer_context=self.layer_context,
         )
-        baseline = sum(t.f1 for t in init_trajectories) / len(init_trajectories) * 100
-        self.sys_desc.baseline_score = baseline
+        planner = PlannerAgent(model=self.planner_model)
+        executor = ActionExecutor(
+            sys_desc=self.sys_desc,
+            source_dir=self.source_dir,
+            target_factory=self.target_factory,
+            target=self.target,
+            dataset=self.dataset,
+            eval_fn=self.eval_fn,
+            score_fn=self.score_fn,
+            model=self.model,
+            layer_context=self.layer_context,
+            analyzer_max_tool_calls=self.max_tool_calls,
+            observer_max_tool_calls=self.observer_max_tool_calls,
+            observe_default_samples=self.n_samples,
+            eval_default_samples=self.eval_n_samples,
+            failure_threshold=self.failure_threshold,
+            observer_search_roots=self.observer_search_roots,
+            optimizer_max_tool_calls=self.optimizer_max_tool_calls,
+            noa_dir=self.noa_dir,
+            project_root=self._project_root,
+            dataset_pickle_path=self.dataset_pickle_path,
+        )
+
+        run_tag = os.path.basename(os.path.abspath(self.source_dir))
+        with PlannerTraceWriter(
+            project_root=self._project_root, layer=layer_label, run_tag=run_tag
+        ) as tracer:
+            trace_path = tracer.path
+            while True:
+                if should_stop(state):
+                    decision = PlannerDecision(
+                        action="stop",
+                        params={},
+                        reason="stop condition reached (budget/no-improve/target)",
+                        expected_gain=0.0,
+                        risk="low",
+                    )
+                else:
+                    decision = planner.decide(state)
+                    state.budget.llm_calls_used += 1  # decision LLM cost
+                    decision = validate_decision(state, decision)
+
+                result = executor.run(decision.action, decision.params, state)
+                state = apply_result(state, decision, result)
+
+                record = PlannerStepRecord(
+                    layer=layer_label,
+                    step=state.budget.step_count,
+                    decision=decision,
+                    result=result,
+                    state_summary=state.summary(),
+                )
+                tracer.write(record)
+
+                # spawn_sublayer 成功且修改了 noa/ → 中断循环，通知 orchestrator 重启
+                if (
+                    decision.action == "spawn_sublayer"
+                    and result.ok
+                    and result.payload.get("noa_modified")
+                ):
+                    break
+
+                if decision.action == "stop":
+                    break
+
+        self.history = state.history
+        final_score = (
+            state.current_score
+            if state.current_score
+            else (state.last_observe_mean or 0.0)
+        )
+        baseline = (
+            state.baseline_score
+            if state.baseline_score
+            else (state.initial_observe_score or 0.0)
+        )
+
+        print("\n[NOA] === Done ===")
         print(f"[NOA] Baseline F1: {baseline:.2f}")
-
-        consecutive_no_accept_cycles = 0
-        cycle_idx = 0
-        cached_trajectories = init_trajectories  # 第一轮复用
-        failure_pool = FailurePool()  # 跨 cycle 累积的 failure pattern 池
-
-        while cycle_idx < self.max_iterations:
-            cycle_idx += 1
-            print(f"\n[NOA] === Cycle {cycle_idx}/{self.max_iterations} ===")
-
-            # --- Observe（首轮复用 initiate 轨迹）---
-            if cached_trajectories is not None:
-                trajectories = cached_trajectories
-                cached_trajectories = None
-                print(f"[NOA] Reusing initial trajectories (skip observe)")
-            else:
-                print(f"[NOA] Observing ({self.n_samples} samples)...")
-                obs_seed = 42 + cycle_idx
-                trajectories = observe(self.target, self.dataset, self.n_samples, seed=obs_seed, score_fn=self.score_fn)
-            self.sys_desc.source_files = collect_sources(self.source_dir)
-
-            mean_f1 = sum(t.f1 for t in trajectories) / len(trajectories) * 100
-            ft = self.failure_threshold
-            if ft is None:
-                scores = sorted(t.f1 for t in trajectories)
-                ft = scores[len(scores) // 2] if scores else 0.5
-            n_failures = sum(1 for t in trajectories if t.f1 < ft)
-            print(f"[NOA] Observed F1: {mean_f1:.2f}, Failures: {n_failures}/{len(trajectories)}")
-
-            # --- Analyze（逐条诊断，累积到 failure pool）---
-            print(f"[NOA] Analyzing failures incrementally...")
-            past = _format_history(self.history)
-            diagnosis, failure_pool = analyze_incremental(
-                self.sys_desc, trajectories, model=self.model,
-                failure_threshold=self.failure_threshold,
-                past_attempts=past, pool=failure_pool, top_n=5,
-            )
-            print(f"[NOA] Pool: {len(failure_pool)} unique patterns")
-            print(f"[NOA] Diagnosis (top patterns): {diagnosis.summary}")
-
-            if not diagnosis.failure_patterns:
-                consecutive_no_accept_cycles += 1
-                print(f"[NOA] No failure patterns found ({consecutive_no_accept_cycles}/2).")
-                if consecutive_no_accept_cycles >= 2:
-                    print(f"[NOA] Stopping (2 consecutive cycles with no progress).")
-                    break
-                continue
-            # 不在这里重置 consecutive_no_accept_cycles，等内层循环判断是否有 accepted
-
-            # --- 逐个 pattern 优化（已按频率排序，高频优先）---
-            sorted_patterns = diagnosis.failure_patterns  # analyze_incremental 已按 count 排序
-            cycle_accepted = False
-
-            for p_idx, pattern in enumerate(sorted_patterns):
-                pat_name = pattern.get("pattern", "unknown")
-                pat_severity = pattern.get("severity", "?")
-                pat_count = pattern.get("count", 1)
-                print(f"\n[NOA]   --- Pattern {p_idx+1}/{len(sorted_patterns)}: [{pat_severity}] {pat_name} (x{pat_count}) ---")
-
-                # 构建单 pattern 的 Diagnosis
-                single_diagnosis = Diagnosis(
-                    failure_patterns=[pattern],
-                    summary=pat_name,
-                    raw_analysis=diagnosis.raw_analysis,
-                )
-
-                # --- Optimize ---
-                past = _format_history(self.history)
-                print(f"[NOA]   Generating patch for pattern: {pat_name}...")
-                patch = optimize(self.sys_desc, single_diagnosis, model=self.model, past_attempts=past)
-                print(f"[NOA]   Diffs: {len(patch.diffs)} blocks")
-                print(f"[NOA]   Rationale: {patch.rationale}")
-
-                if not patch.diffs:
-                    print(f"[NOA]   Empty patch, skipping pattern.")
-                    continue
-
-                # --- Evaluate ---
-                print(f"[NOA]   Evaluating patch...")
-                result = evaluate(
-                    source_files=self.sys_desc.source_files,
-                    source_dir=self.source_dir,
-                    patch=patch,
-                    dataset=self.dataset,
-                    eval_fn=self.eval_fn,
-                    target_factory=self.target_factory,
-                    baseline_score=baseline,
-                    n_samples=self.eval_n_samples,
-                    seed=43,
-                )
-
-                status = "ACCEPTED" if result.accepted else "REJECTED"
-                print(f"[NOA]   {status}: {result.before_score:.2f} -> {result.after_score:.2f}")
-
-                self.history.append({
-                    "iteration": cycle_idx,
-                    "pattern": pat_name,
-                    "severity": pat_severity,
-                    "diagnosis": single_diagnosis.summary,
-                    "diffs": patch.diffs,
-                    "rationale": patch.rationale,
-                    "before": result.before_score,
-                    "after": result.after_score,
-                    "accepted": result.accepted,
-                })
-
-                if result.accepted:
-                    baseline = result.after_score
-                    cycle_accepted = True
-                    # 刷新源码 + 重建 target + 更新 sys_desc
-                    self.target = self.target_factory(self.source_dir)
-                    self.sys_desc.source_files = collect_sources(self.source_dir)
-
-            if cycle_accepted:
-                consecutive_no_accept_cycles = 0
-            else:
-                consecutive_no_accept_cycles += 1
-                if consecutive_no_accept_cycles >= 2:
-                    print(f"[NOA] Stopping (2 consecutive cycles with no accepted patch).")
-                    break
-
-        accepted_count = sum(1 for h in self.history if h["accepted"])
-
-        # 全量最终评估（用完整 n_samples 测真实分数）
-        if accepted_count > 0 and self.n_samples != self.eval_n_samples:
-            print(f"\n[NOA] === Final Evaluation ({self.n_samples} samples) ===")
-            final_trajectories = observe(
-                self.target, self.dataset, self.n_samples,
-                seed=43, score_fn=self.score_fn,
-            )
-            final_score = sum(t.f1 for t in final_trajectories) / len(final_trajectories) * 100
-        else:
-            final_score = baseline
-
-        print(f"\n[NOA] === Done ===")
         print(f"[NOA] Final F1: {final_score:.2f}")
-        print(f"[NOA] Iterations: {len(self.history)}")
-        print(f"[NOA] Accepted patches: {accepted_count}/{len(self.history)}")
+        print(f"[NOA] Planner steps: {state.budget.step_count}")
+        print(f"[NOA] Accepted patches: {state.accepted_patches}")
+
+        spawn_restart = any(
+            h.get("action") == "spawn_sublayer"
+            and h.get("payload", {}).get("noa_modified")
+            for h in state.history
+        )
 
         return {
             "final_score": final_score,
-            "baseline_score": self.sys_desc.baseline_score,
-            "iterations": len(self.history),
-            "accepted": accepted_count,
+            "baseline_score": baseline,
+            "iterations": state.budget.step_count,
+            "accepted": state.accepted_patches,
             "history": self.history,
+            "planner_steps": state.budget.step_count,
+            "budget_usage": state.budget.to_summary(),
+            "action_stats": state.action_counts,
+            "planner_trace_path": trace_path,
+            "spawn_restart": spawn_restart,
         }
 
     def __call__(self, **kwargs) -> dict:
-        """执行一轮完整优化并返回结果，供 L2 使用。"""
         return self.run()
 
 
-def _truncate_line(line: str, max_chars: int = 100) -> str:
-    return line if len(line) <= max_chars else line[:max_chars - 3] + "..."
-
-
-def _format_diff_block(diff, max_lines: int = 30) -> str:
-    """将单个 DiffBlock 格式化为紧凑摘要。"""
-    search_lines = diff.search.splitlines()
-    replace_lines = diff.replace.splitlines()
-    # 截断到 max_lines
-    if len(search_lines) > max_lines:
-        search_lines = search_lines[:max_lines] + [f"... ({len(search_lines) - max_lines} more lines)"]
-    if len(replace_lines) > max_lines:
-        replace_lines = replace_lines[:max_lines] + [f"... ({len(replace_lines) - max_lines} more lines)"]
-    search_text = "\n".join(_truncate_line(l) for l in search_lines)
-    replace_text = "\n".join(_truncate_line(l) for l in replace_lines)
-    return (
-        f"## File: {diff.file_path}\n"
-        f"<<<<<<< SEARCH\n{search_text}\n"
-        f"=======\n{replace_text}\n"
-        f">>>>>>> REPLACE"
-    )
-
-
 def _format_history(history: list[dict]) -> str:
-    """将历史尝试格式化为 LLM 可读摘要。"""
+    """Compact history formatter used by downstream prompts/logging."""
     if not history:
         return ""
-    parts = []
+    lines: list[str] = []
     for h in history:
-        status = "ACCEPTED" if h["accepted"] else "REJECTED"
-        header = f"### Attempt {h['iteration']} [{status}] {h['before']:.2f} → {h['after']:.2f}"
-        diff_text = "\n".join(_format_diff_block(d) for d in h["diffs"])
-        parts.append(f"{header}\nRationale: {h['rationale']}\n{diff_text}")
-    return "\n\n".join(parts)
+        line = (
+            f"step={h.get('step', '?')} action={h.get('action', '?')} ok={h.get('ok', '?')} "
+            f"reason={h.get('reason', '')[:80]} summary={h.get('summary', '')[:120]}"
+        )
+        payload = h.get("payload")
+        if payload:
+            line += f" payload={str(payload)[:280]}"
+        err = h.get("error")
+        if err:
+            line += f" error={str(err)[:160]}"
+        lines.append(line)
+    return "\n".join(lines)

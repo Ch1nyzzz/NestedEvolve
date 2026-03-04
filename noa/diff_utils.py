@@ -10,6 +10,17 @@ import tempfile
 from noa.core.protocol import SourceFile, DiffBlock
 
 
+def _normalize_diff_path(path: str) -> str | None:
+    """规范化 diff 中的文件路径。拒绝含 ../ 的路径，去除 ./ 前缀。"""
+    if ".." in path.split("/") or ".." in path.split(os.sep):
+        return None
+    # 去除 ./ 前缀和连续 /
+    normalized = os.path.normpath(path)
+    if normalized.startswith(os.sep):
+        return None  # 拒绝绝对路径
+    return normalized
+
+
 def extract_diffs(text: str, source_files: list[SourceFile]) -> list[DiffBlock]:
     """从 LLM 输出解析 SEARCH/REPLACE 块。
 
@@ -27,7 +38,6 @@ def extract_diffs(text: str, source_files: list[SourceFile]) -> list[DiffBlock]:
     file_sections = re.split(r"^## File:\s*(.+)$", text, flags=re.MULTILINE)
 
     # file_sections: ['前导文本', 'filename1', 'content1', 'filename2', 'content2', ...]
-    current_file = None
     sections: list[tuple[str | None, str]] = []
 
     if len(file_sections) >= 3:
@@ -56,11 +66,17 @@ def extract_diffs(text: str, source_files: list[SourceFile]) -> list[DiffBlock]:
                 resolved_path = _find_file_for_search(search, source_files)
 
             if resolved_path:
-                diffs.append(DiffBlock(
-                    file_path=resolved_path,
-                    search=search,
-                    replace=replace,
-                ))
+                normalized = _normalize_diff_path(resolved_path)
+                if normalized is None:
+                    print(f"[DiffUtils] 拒绝非法路径: {resolved_path}")
+                    continue
+                diffs.append(
+                    DiffBlock(
+                        file_path=normalized,
+                        search=search,
+                        replace=replace,
+                    )
+                )
 
     return diffs
 
@@ -81,7 +97,8 @@ def _find_file_for_search(search: str, source_files: list[SourceFile]) -> str | 
 
 
 def apply_diffs_in_memory(
-    source_files: list[SourceFile], diffs: list[DiffBlock],
+    source_files: list[SourceFile],
+    diffs: list[DiffBlock],
 ) -> list[SourceFile]:
     """在内存中应用 diff，返回修改后的文件列表。
 
@@ -99,7 +116,9 @@ def apply_diffs_in_memory(
         content = file_contents[diff.file_path]
         # 先尝试直接字符串替换
         if diff.search in content:
-            file_contents[diff.file_path] = content.replace(diff.search, diff.replace, 1)
+            file_contents[diff.file_path] = content.replace(
+                diff.search, diff.replace, 1
+            )
             modified.add(diff.file_path)
             continue
 
@@ -126,9 +145,9 @@ def _apply_linewise(content: str, search: str, replace: str) -> tuple[str, bool]
             return "\n".join(lines), True
 
     # 尝试 strip 后匹配
-    stripped_search = [l.rstrip() for l in search_lines]
+    stripped_search = [ln.rstrip() for ln in search_lines]
     for i in range(len(lines) - len(search_lines) + 1):
-        if [l.rstrip() for l in lines[i : i + len(search_lines)]] == stripped_search:
+        if [ln.rstrip() for ln in lines[i : i + len(search_lines)]] == stripped_search:
             lines[i : i + len(search_lines)] = replace_lines
             return "\n".join(lines), True
 
@@ -136,7 +155,8 @@ def _apply_linewise(content: str, search: str, replace: str) -> tuple[str, bool]
 
 
 def write_to_temp_dir(
-    modified_files: list[SourceFile], source_dir: str,
+    modified_files: list[SourceFile],
+    source_dir: str,
 ) -> str:
     """将修改后的文件写入临时目录，保持完整目录结构。
 
@@ -158,10 +178,18 @@ def write_to_temp_dir(
     return target_dir
 
 
-def commit_to_source(modified_files: list[SourceFile], source_dir: str) -> None:
-    """接受 patch 后，将修改写回原始文件。"""
+def commit_to_source(
+    modified_files: list[SourceFile],
+    source_dir: str,
+    layer_context=None,
+) -> None:
+    """接受 patch 后，将修改写回原始文件。有 layer_context 时检查写权限。"""
     for sf in modified_files:
         fpath = os.path.join(source_dir, sf.path)
+        if layer_context is not None and not layer_context.check_write_permission(
+            fpath
+        ):
+            raise PermissionError(f"Layer {layer_context.layer_id} 无权写入: {fpath}")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(sf.content)
 

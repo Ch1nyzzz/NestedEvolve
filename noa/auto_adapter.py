@@ -6,7 +6,7 @@ import importlib.util
 import os
 import sys
 
-from utils.llm import llm_call
+from utils.llm import llm_call, resolve_model
 from noa.core import prompts
 
 _ADAPTER_FILENAME = "_noa_adapter.py"
@@ -16,7 +16,7 @@ _MAX_RETRIES = 3
 def auto_adapt(
     source_dir: str,
     entry_hint: str = "",
-    model: str = "gpt-4.1-mini",
+    model: str = resolve_model("gpt-4.1-mini"),
     force: bool = False,
 ) -> tuple[object, callable]:
     """扫描 source_dir 源码，用 LLM 生成 Adapter 类。
@@ -69,7 +69,9 @@ def auto_adapt(
         except Exception as e:
             print(f"[AutoAdapter] 验证失败: {e}")
             if attempt < _MAX_RETRIES:
-                user_prompt += f"\n\n## Previous Error\n{e}\nFix the code and try again."
+                user_prompt += (
+                    f"\n\n## Previous Error\n{e}\nFix the code and try again."
+                )
             else:
                 raise RuntimeError(
                     f"auto_adapt 在 {_MAX_RETRIES} 次尝试后仍失败: {e}"
@@ -98,6 +100,7 @@ def _make_factory(adapter_path: str, original_source_dir: str) -> callable:
         fpath = os.path.join(target_dir, adapter_filename)
         if not os.path.exists(fpath):
             import shutil
+
             shutil.copy2(adapter_path, fpath)
 
         # 清除目标系统模块缓存 + 重定向包路径，确保从 target_dir 加载
@@ -270,7 +273,11 @@ def _ensure_package_imported(source_dir: str):
 
     # 导入包内所有子模块（使相对导入在包上下文中正确解析）
     for fname in os.listdir(source_dir):
-        if fname.endswith(".py") and fname != "__init__.py" and fname != _ADAPTER_FILENAME:
+        if (
+            fname.endswith(".py")
+            and fname != "__init__.py"
+            and fname != _ADAPTER_FILENAME
+        ):
             mod_name = fname[:-3]
             full_name = f"{pkg_name}.{mod_name}"
             if full_name not in sys.modules:
@@ -285,7 +292,7 @@ def _ensure_package_imported(source_dir: str):
     prefix = pkg_name + "."
     for name, mod in list(sys.modules.items()):
         if name.startswith(prefix):
-            short = name[len(prefix):]
+            short = name[len(prefix) :]
             if "." not in short and short not in sys.modules:
                 sys.modules[short] = mod
                 aliases_created.append(short)
@@ -300,6 +307,14 @@ def _load_adapter(adapter_path: str, source_dir: str) -> object:
 
 
 def _validate(adapter: object) -> None:
-    """验证 adapter 实现了 __call__ 接口。"""
+    """验证 adapter 实现了 __call__ 接口。get_components 为可选增强。"""
     if not callable(adapter):
         raise TypeError("adapter 不可调用，缺少 __call__ 方法")
+    if hasattr(adapter, "get_components"):
+        comps = adapter.get_components()
+        if not isinstance(comps, dict):
+            print("[AutoAdapter] 警告: get_components() 未返回 dict，忽略")
+        else:
+            print(
+                f"[AutoAdapter] get_components() 返回 {len(comps)} 个组件: {list(comps.keys())}"
+            )
