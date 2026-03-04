@@ -7,6 +7,11 @@ import os
 from types import SimpleNamespace
 
 from noa.core.protocol import Diagnosis, LayerContext, Trajectory
+from noa.eval_guard import (
+    RejectedPatchTracker,
+    dedup_check,
+    quality_gate,
+)
 from noa.planner.protocol import ActionResult, PlannerState
 from noa.stages.analyzer import analyze_incremental, _format_trajectory
 from noa.stages.evaluator import evaluate
@@ -72,6 +77,7 @@ class ActionExecutor(BaseActionExecutor):
         self.observer_search_roots = observer_search_roots
         self.optimizer_max_tool_calls = optimizer_max_tool_calls
         self.failure_pool = None
+        self.rejected_patch_tracker = RejectedPatchTracker()
         self.noa_dir = noa_dir
         self.project_root = project_root
         self.dataset_pickle_path = dataset_pickle_path
@@ -221,12 +227,45 @@ class ActionExecutor(BaseActionExecutor):
                 action="evaluate_patch", ok=False, error="No candidate patch"
             )
 
+        patch = state.candidate_patch
+
+        # --- Pre-filter 1: Quality Gate ---
+        gate_result = quality_gate(patch, baseline_score=state.current_score)
+        if gate_result is not None:
+            log.info(
+                f"[EvalGuard] Quality gate rejected: "
+                f"quality_score={patch.quality_score:.2f}"
+            )
+            self.rejected_patch_tracker.record_rejection(patch, "quality_gate")
+            return ActionResult(
+                action="evaluate_patch",
+                ok=True,
+                summary=f"REJECTED (quality gate: {patch.quality_score:.2f}) {gate_result.before_score:.2f} -> {gate_result.after_score:.2f}",
+                payload={"eval_result": gate_result},
+                eval_calls=0,  # 没有实际执行 pipeline
+            )
+
+        # --- Pre-filter 2: Rejected Patch Dedup ---
+        dedup_result = dedup_check(
+            patch, self.rejected_patch_tracker, baseline_score=state.current_score
+        )
+        if dedup_result is not None:
+            log.info("[EvalGuard] Dedup gate rejected: similar to previously rejected patch")
+            return ActionResult(
+                action="evaluate_patch",
+                ok=True,
+                summary=f"REJECTED (dedup) {dedup_result.before_score:.2f} -> {dedup_result.after_score:.2f}",
+                payload={"eval_result": dedup_result},
+                eval_calls=0,
+            )
+
+        # --- Full cascade evaluation (with progressive sampling) ---
         n_samples = int(params.get("n_samples", self.eval_default_samples))
         seed = int(params.get("seed", 43))
         result = evaluate(
             source_files=self.sys_desc.source_files,
             source_dir=self.source_dir,
-            patch=state.candidate_patch,
+            patch=patch,
             dataset=self.dataset,
             eval_fn=self.eval_fn,
             target_factory=self.target_factory,
@@ -234,7 +273,15 @@ class ActionExecutor(BaseActionExecutor):
             n_samples=n_samples,
             seed=seed,
             layer_context=self.layer_context,
+            progressive=True,
         )
+
+        # 记录被 reject 的 patch
+        if not result.accepted:
+            self.rejected_patch_tracker.record_rejection(
+                patch, result.failure_reason or "no_improvement"
+            )
+
         if result.accepted:
             self.target = self.target_factory(self.source_dir)
             self.sys_desc.source_files = collect_sources(self.source_dir)
