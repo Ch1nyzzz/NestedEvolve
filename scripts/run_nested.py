@@ -10,16 +10,14 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from noa import Orchestrator
+from noa.auto_adapter import auto_adapt
+from scripts.archive_trajectories import archive_and_reset_trajectory_dir
+from target_systems.hotpotqa_rag.evaluate import evaluate_batch, f1_score
+from utils.data import load_hotpotqa
+from utils.llm import resolve_model
+
 load_dotenv()
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from utils.data import load_hotpotqa  # noqa: E402
-from utils.llm import resolve_model  # noqa: E402
-from target_systems.hotpotqa_rag.evaluate import evaluate_batch, f1_score  # noqa: E402
-from noa import Orchestrator  # noqa: E402
-from noa.auto_adapter import auto_adapt  # noqa: E402
-from scripts.archive_trajectories import archive_and_reset_trajectory_dir  # noqa: E402
 
 
 def main():
