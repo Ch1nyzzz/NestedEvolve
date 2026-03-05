@@ -107,6 +107,8 @@ def _format_l1_intermediate(result: dict) -> str:
     budget = result.get("budget_usage", {})
 
     lines = [
+        "  [META-NOTE: Below is a LOWER-LAYER optimizer run result. "
+        "Diagnose the optimizer's STRATEGY flaws, not the target system's bugs.]",
         f"  [L1 Run Result] baseline={baseline:.2f} → final={final:.2f} (Δ={final - baseline:+.2f})",
         f"  accepted_patches={accepted}, steps={steps}",
     ]
@@ -290,6 +292,19 @@ def analyze_incremental(
 
     # 取 top-N 作为本轮诊断结果
     top_patterns = pool.top_n(top_n)
+
+    # 校验 affected_file 是否在 source_files 范围内
+    valid_files = {sf.path for sf in sys_desc.source_files}
+    for p in top_patterns:
+        af = p.get("affected_file", "")
+        if af and af not in valid_files:
+            log.warning("Pattern affected_file '%s' not in source_files, clearing", af)
+            p["affected_file"] = ""
+            p["root_cause"] = (
+                p.get("root_cause", "")
+                + f" [NOTE: Originally referenced '{af}' which is outside writable scope]"
+            )
+
     summary = (
         "; ".join(f"{p['pattern']} (x{p['count']})" for p in top_patterns[:3])
         if top_patterns

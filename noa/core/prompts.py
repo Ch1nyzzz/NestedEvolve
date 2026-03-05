@@ -47,6 +47,8 @@ Identify the root causes of failures. Do not repeat past failed approaches. For 
 4. Affected file
 5. Suggested fix
 
+If you are a meta-optimizer (layer_context is present), the `affected_file` MUST be a file within your writable scope (the optimizer framework). Do NOT reference target system files.
+
 Output JSON: [{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "...", "affected_file": "...", "suggested_fix": "..."}}]
 {layer_context}"""
 
@@ -78,6 +80,8 @@ You have full visibility into the system. Diagnose this failure using source cod
 
 If the failure matches an EXISTING pattern in the pool, output `merge_to` with the pool index.
 If it is a NEW pattern, omit `merge_to`.
+
+If you are a meta-optimizer (layer_context is present), the `affected_file` MUST be a file within your writable scope (the optimizer framework). Do NOT reference target system files.
 
 Output JSON (a list with one or a few pattern objects):
 [{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "high|medium|low", "affected_file": "...", "suggested_fix": "...", "merge_to": <int or null>}}]
@@ -122,6 +126,8 @@ You have tools to run individual components of the target system for micro-exper
 - Each experiment should test ONE specific hypothesis
 - If trajectory evidence is incomplete (missing `intermediate`), diagnose the observability gap first
 
+If you are a meta-optimizer (layer_context is present), the `affected_file` MUST be a file within your writable scope (the optimizer framework). Do NOT reference target system files.
+
 When done, output your diagnosis as JSON:
 [{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "high|medium|low", "affected_file": "...", "suggested_fix": "...", "merge_to": <int or null>}}]
 {layer_context}"""
@@ -154,6 +160,7 @@ Rules:
 - SEARCH block must exactly match existing code (verbatim, including whitespace)
 - Minimize changes — one patch should fix one specific issue
 - Prefer modifying prompts and configuration values before changing logic
+- You can ONLY modify files listed in the Source Code section above. If the diagnosis mentions files not in your source code, translate the fix to the corresponding optimizer framework file.
 
 Output format — for each file you modify:
 

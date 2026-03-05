@@ -132,6 +132,23 @@ class LayerContext:
         if self.level <= 1:
             return ""
         parts = [f"## Layer Context ({self.layer_id}, level={self.level})"]
+
+        # 角色约束：明确告诉 L2+ 它的优化目标是框架代码，而非目标系统
+        writable_name = os.path.basename(self.writable_root.rstrip("/"))
+        parts.append(
+            f"### Role Constraints\n"
+            f"You are a META-OPTIMIZER at {self.layer_id}. "
+            f"Your optimization target is the optimizer framework code in `{writable_name}/`, NOT the end-user target system.\n"
+            f"- You can ONLY modify files under `{writable_name}/`\n"
+            f"- The trajectories below show how the lower-layer optimizer performed. "
+            f"Diagnose WHY the optimizer's strategy failed, not what the target system did wrong.\n"
+            f"- If you see component names like 'QuestionRewriter', 'Retriever' etc. in trajectory data, "
+            f"those are the TARGET SYSTEM's components that the lower-layer was trying to optimize. "
+            f"Do NOT try to modify those files — they are outside your scope.\n"
+            f"- Focus on: analyzer prompts, optimizer prompts, evaluation logic, planner guardrails, "
+            f"observation strategies, and other optimizer framework code."
+        )
+
         if self.parent_summary:
             parts.append(f"### Parent Summary\n{self.parent_summary}")
         if self.parent_history:
