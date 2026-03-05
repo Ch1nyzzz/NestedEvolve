@@ -96,7 +96,13 @@ class ActionExecutor(BaseActionExecutor):
             max_tool_calls=self.observer_max_tool_calls,
             layer_context=self._layer_context_text(),
             layer_context_obj=self.layer_context,
-            required_intermediate_keys=getattr(self.sys_desc, "component_names", None),
+            # L2+ 元优化层的 target 是 optimizer subprocess，intermediate 是优化结果 dict
+            # 而非 L0 组件级输出，无需检查 component_names
+            required_intermediate_keys=(
+                None
+                if self.layer_context and self.layer_context.level >= 2
+                else getattr(self.sys_desc, "component_names", None)
+            ),
         )
         if not trajectories:
             return ActionResult(
