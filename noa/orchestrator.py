@@ -105,6 +105,7 @@ class Orchestrator:
         # 递归参数
         max_depth: int = 3,
         max_spawn_calls: int = 2,
+        spawn_config: dict | None = None,
         # 兼容旧参数（忽略）
         l2_max_steps: int = 12,
         l2_n_samples: int | None = None,
@@ -138,6 +139,7 @@ class Orchestrator:
 
         self.max_depth = max_depth
         self.max_spawn_calls = max_spawn_calls
+        self.spawn_config = spawn_config or {}
 
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         cache_dir = os.path.join(self.project_root, ".noa_cache")
@@ -180,6 +182,7 @@ class Orchestrator:
             layer_context=layer_context,
             noa_dir=ws_noa,
             dataset_pickle_path=self.dataset_pickle_path,
+            spawn_config=self.spawn_config,
         )
         result = optimizer.run()
         ws.snapshot("after_round_0")

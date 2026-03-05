@@ -67,6 +67,7 @@ class ActionExecutor(BaseActionExecutor):
         noa_dir: str | None = None,
         project_root: str | None = None,
         dataset_pickle_path: str | None = None,
+        spawn_config: dict | None = None,
     ):
         self.sys_desc = sys_desc
         self.source_dir = source_dir
@@ -88,6 +89,7 @@ class ActionExecutor(BaseActionExecutor):
         self.noa_dir = noa_dir
         self.project_root = project_root
         self.dataset_pickle_path = dataset_pickle_path
+        self.spawn_config = spawn_config or {}
 
     def _layer_context_text(self) -> str:
         if self.layer_context is None:
@@ -680,6 +682,8 @@ class ActionExecutor(BaseActionExecutor):
             dpp = serialize_dataset(self.dataset, cache_dir=cache_dir)
 
         # child target_factory: 调 subprocess mini-L1 评估 noa/ 修改效果
+        ml1 = self.spawn_config.get("mini_l1", {})
+
         def child_target_factory(noa_source_dir):
             def target(question):
                 result = run_layer_subprocess(
@@ -688,12 +692,12 @@ class ActionExecutor(BaseActionExecutor):
                     target_source_dir=self.source_dir,
                     dataset_pickle_path=dpp,
                     layer_level=1,
-                    max_steps=8,
-                    n_samples=10,
-                    eval_n_samples=10,
-                    max_llm_calls=40,
-                    max_evals=4,
-                    max_no_improve_steps=3,
+                    max_steps=ml1.get("max_steps", 8),
+                    n_samples=ml1.get("n_samples", 10),
+                    eval_n_samples=ml1.get("eval_n_samples", 10),
+                    max_llm_calls=ml1.get("max_llm_calls", 40),
+                    max_evals=ml1.get("max_evals", 4),
+                    max_no_improve_steps=ml1.get("max_no_improve_steps", 3),
                     model=self.model,
                     isolate_source=True,
                 )
@@ -752,19 +756,20 @@ class ActionExecutor(BaseActionExecutor):
         log.info(
             f"[Spawn] Instantiating L{child_level} NOptimizer (source_dir={noa_dir})"
         )
+        l2 = self.spawn_config.get("l2", {})
         child = NOptimizer(
             source_dir=noa_dir,
             target_factory=child_target_factory,
             dataset=child_dataset,
             eval_fn=child_eval_fn,
-            max_steps=12,
-            n_samples=2,
-            eval_n_samples=2,
+            max_steps=l2.get("max_steps", 12),
+            n_samples=l2.get("n_samples", 2),
+            eval_n_samples=l2.get("eval_n_samples", 2),
             model=self.model,
             score_fn=child_score_fn,
-            max_llm_calls=60,
-            max_evals=8,
-            max_no_improve_steps=4,
+            max_llm_calls=l2.get("max_llm_calls", 60),
+            max_evals=l2.get("max_evals", 8),
+            max_no_improve_steps=l2.get("max_no_improve_steps", 4),
             layer_context=child_layer_context,
             observer_search_roots=[noa_dir],
         )

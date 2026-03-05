@@ -62,6 +62,7 @@ class NOptimizer:
         observer_search_roots: list[str] | None = None,
         noa_dir: str | None = None,
         dataset_pickle_path: str | None = None,
+        spawn_config: dict | None = None,
     ):
         self.source_dir = source_dir
         self.target_factory = target_factory
@@ -94,6 +95,7 @@ class NOptimizer:
         self.observer_search_roots = observer_search_roots
         self.noa_dir = noa_dir
         self.dataset_pickle_path = dataset_pickle_path
+        self.spawn_config = spawn_config or {}
 
         self.target = target_factory(source_dir)
         self.sys_desc: SystemDescription | None = None
@@ -140,6 +142,7 @@ class NOptimizer:
             noa_dir=self.noa_dir,
             project_root=self._project_root,
             dataset_pickle_path=self.dataset_pickle_path,
+            spawn_config=self.spawn_config,
         )
 
         run_tag = os.path.basename(os.path.abspath(self.source_dir))

@@ -28,6 +28,7 @@ def main():
     data = cfg.get("data", {})
     opt = cfg.get("optimizer", {})
     nest = cfg.get("nesting", {})
+    spawn = cfg.get("spawn", {})
     history = cfg.get("history", {})
     output = cfg.get("output")
 
@@ -73,6 +74,7 @@ def main():
         l1_optimizer_tool_calls=opt.get("optimizer_tool_calls", 5),
         max_depth=nest.get("max_depth", 3),
         max_spawn_calls=nest.get("max_spawn_calls", 2),
+        spawn_config=spawn,
     )
     results = orch.run()
 
