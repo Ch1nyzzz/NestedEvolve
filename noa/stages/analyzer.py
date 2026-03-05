@@ -80,14 +80,78 @@ def _format_trajectory(t: Trajectory, label: str) -> str:
         parts.append(f"ERROR: {t.error[:500]}")
     if not t.intermediate:
         parts.append("  intermediate: (missing)")
-    for comp_name, output in t.intermediate.items():
-        if isinstance(output, dict):
-            for k, v in output.items():
-                val = str(v)
-                parts.append(f"  {comp_name}.{k}: {val}")
-        else:
-            parts.append(f"  {comp_name}: {str(output)[:500]}")
+    elif _is_l1_result(t.intermediate):
+        parts.append(_format_l1_intermediate(t.intermediate))
+    else:
+        for comp_name, output in t.intermediate.items():
+            if isinstance(output, dict):
+                for k, v in output.items():
+                    val = str(v)
+                    parts.append(f"  {comp_name}.{k}: {val}")
+            else:
+                parts.append(f"  {comp_name}: {str(output)[:500]}")
     return "\n".join(parts)
+
+
+def _is_l1_result(intermediate: dict) -> bool:
+    """检测 intermediate 是否为 L1 optimizer 运行结果。"""
+    return "final_score" in intermediate and "history" in intermediate
+
+
+def _format_l1_intermediate(result: dict) -> str:
+    """将 L1 optimizer 运行结果格式化为 L2 analyzer 可读的结构化文本。"""
+    final = result.get("final_score", 0)
+    baseline = result.get("baseline_score", 0)
+    accepted = result.get("accepted", 0)
+    steps = result.get("planner_steps", 0)
+    budget = result.get("budget_usage", {})
+
+    lines = [
+        f"  [L1 Run Result] baseline={baseline:.2f} → final={final:.2f} (Δ={final - baseline:+.2f})",
+        f"  accepted_patches={accepted}, steps={steps}",
+    ]
+    if budget:
+        lines.append(f"  budget: {budget}")
+
+    history = result.get("history", [])
+    if not history:
+        lines.append("  (no history)")
+        return "\n".join(lines)
+
+    # 提取 analyze/propose_patch/evaluate 步骤的关键信息
+    iter_count = 0
+    for h in history:
+        action = h.get("action", "")
+        payload = h.get("payload", {})
+
+        if action == "analyze" and h.get("ok"):
+            diag = payload.get("diagnosis_summary", "") or h.get("summary", "")
+            n_patterns = payload.get("n_patterns", "?")
+            lines.append(f"  [Analyze] {diag[:200]} (patterns={n_patterns})")
+
+        elif action == "propose_patch" and h.get("ok"):
+            n_diffs = payload.get("n_diffs", "?")
+            rationale = payload.get("rationale", "")[:150]
+            lines.append(f"  [Patch] diffs={n_diffs}, rationale={rationale}")
+            for ds in payload.get("diff_summaries", [])[:3]:
+                if isinstance(ds, dict):
+                    fp = ds.get("file_path", "?")
+                    search = ds.get("search", "")[:80]
+                    replace = ds.get("replace", "")[:80]
+                    lines.append(f"    {fp}: {search!r} → {replace!r}")
+
+        elif action in ("evaluate_patch", "parallel_optimize"):
+            iter_count += 1
+            acc = payload.get("accepted", False)
+            before = payload.get("before", 0)
+            after = payload.get("after", 0)
+            status = "ACCEPTED" if acc else "REJECTED"
+            lines.append(f"  [Eval-{iter_count}] {status} {before:.2f}→{after:.2f}")
+            fb = payload.get("eval_feedback", {})
+            if fb.get("next_focus"):
+                lines.append(f"    next_focus: {fb['next_focus'][:150]}")
+
+    return "\n".join(lines)
 
 
 def analyze_incremental(
@@ -97,11 +161,12 @@ def analyze_incremental(
     failure_threshold: float | None = None,
     past_attempts: str = "",
     pool: FailurePool | None = None,
-    top_n: int = 5,
+    top_n: int = 10,
     max_concurrency: int = 8,
     probe=None,
     max_tool_calls: int = 10,
     layer_context: str = "",
+    eval_feedback: str = "",
 ) -> tuple[Diagnosis, FailurePool]:
     """逐条分析失败轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
 
@@ -126,6 +191,11 @@ def analyze_incremental(
     source_code = sys_desc.get_source_context()
     trajectory_quality = _trajectory_quality_context(trajectories, failures)
 
+    # 构建 eval feedback 上下文
+    eval_feedback_section = ""
+    if eval_feedback:
+        eval_feedback_section = f"\n## Previous Evaluation Feedback\n{eval_feedback}\n"
+
     def _diagnose_one_simple(t: Trajectory) -> tuple[Trajectory, list[dict]]:
         """Fallback：单次 LLM 调用（无 probe）。"""
         traj_text = _format_trajectory(t, label="FAIL")
@@ -135,7 +205,7 @@ def analyze_incremental(
             trajectory=traj_text,
             trajectory_quality=trajectory_quality,
             pool_context=pool_snapshot,
-            past_attempts=past_attempts or "(none)",
+            past_attempts=(past_attempts or "(none)") + eval_feedback_section,
             layer_context=layer_context,
         )
         resp = llm_call(
@@ -158,7 +228,7 @@ def analyze_incremental(
             trajectory=traj_text,
             trajectory_quality=trajectory_quality,
             pool_context=pool_snapshot,
-            past_attempts=past_attempts or "(none)",
+            past_attempts=(past_attempts or "(none)") + eval_feedback_section,
             layer_context=layer_context,
         )
         messages = [

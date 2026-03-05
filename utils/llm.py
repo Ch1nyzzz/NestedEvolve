@@ -27,6 +27,19 @@ DEFAULT_MODEL = (
 MAX_RETRIES = 3
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+LLM_TIMEOUT_SEC = _env_float("LLM_TIMEOUT_SEC", 120.0)
+
+
 def resolve_model(model: str) -> str:
     """根据 LLM_PROVIDER 将模型名映射到对应的提供商模型。"""
     if LLM_PROVIDER == "anthropic" and model.startswith("gpt"):
@@ -79,6 +92,7 @@ def llm_call(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                timeout=LLM_TIMEOUT_SEC,
             )
             latency = (time.time() - t0) * 1000
             return LLMResponse(
@@ -120,6 +134,7 @@ def llm_call_with_tools(
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
+        timeout=LLM_TIMEOUT_SEC,
     )
     if tools:
         kwargs["tools"] = tools

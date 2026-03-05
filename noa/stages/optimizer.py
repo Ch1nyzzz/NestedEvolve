@@ -20,6 +20,7 @@ def optimize(
     past_attempts: str = "",
     layer_context: str = "",
     trajectory_samples: str = "",
+    temperature: float = 0,
 ) -> DeltaPatch:
     """基于诊断结果生成 SEARCH/REPLACE diff patch，并进行自检评分。"""
     diag_text = json.dumps(diagnosis.failure_patterns, indent=2, ensure_ascii=False)
@@ -37,7 +38,7 @@ def optimize(
         prompt,
         model=model,
         max_tokens=16384,
-        temperature=0,
+        temperature=temperature,
         system=prompts.OPTIMIZER_SYSTEM,
     )
 
@@ -70,6 +71,7 @@ def optimize_agentic(
     layer_context: str = "",
     max_tool_calls: int = 5,
     trajectory_samples: str = "",
+    temperature: float = 0,
 ) -> DeltaPatch:
     """Agentic optimizer — 多轮 tool-calling 验证 SEARCH block 精确匹配。
 
@@ -83,6 +85,7 @@ def optimize_agentic(
             past_attempts,
             layer_context,
             trajectory_samples=trajectory_samples,
+            temperature=temperature,
         )
 
     from noa.stages.agentic import agentic_loop

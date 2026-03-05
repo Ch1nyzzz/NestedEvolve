@@ -27,6 +27,12 @@ def apply_result(
                 result.payload.get("intermediate_coverage", 0.0)
             )
         state.last_replay_count = int(result.payload.get("replay_count", 0))
+        # 记录 baseline details 用于后续 eval feedback 对比
+        state.baseline_details = [
+            {"question": getattr(t, "question", ""), "f1": getattr(t, "f1", 0)}
+            for t in trajectories
+            if hasattr(t, "question")
+        ]
         if state.initial_observe_score is None:
             state.initial_observe_score = state.last_observe_mean
             state.baseline_score = state.last_observe_mean
@@ -52,7 +58,32 @@ def apply_result(
                 state.no_improve_steps = 0
             else:
                 state.no_improve_steps += 1
+            # 保存结构化反馈
+            feedback = getattr(eval_result, "feedback", None)
+            if feedback:
+                state.eval_feedback_history.append(feedback)
         state.candidate_patch = None
+
+    elif decision.action == "parallel_optimize" and result.ok:
+        eval_result = result.payload.get("eval_result")
+        accepted_count = int(result.payload.get("accepted_count", 0))
+        if accepted_count > 0:
+            combined_delta = float(result.payload.get("combined_delta", 0))
+            state.current_score = state.current_score + combined_delta
+            state.accepted_patches += accepted_count
+            state.no_improve_steps = 0
+            # 保存结构化反馈
+            if eval_result is not None:
+                state.last_eval = eval_result
+                feedback = getattr(eval_result, "feedback", None)
+                if feedback:
+                    state.eval_feedback_history.append(feedback)
+        else:
+            state.no_improve_steps += 1
+        state.candidate_patch = None
+        state.candidate_patches = []
+        # parallel_optimize 后清空 diagnosis，下轮重新 observe+analyze
+        state.diagnosis = None
 
     elif decision.action == "spawn_sublayer" and result.ok:
         state.trajectories = []
@@ -127,12 +158,39 @@ def _compact_payload(payload: dict) -> dict:
         if key == "patch" and val is not None:
             compact["n_diffs"] = len(getattr(val, "diffs", []))
             compact["patch_quality_score"] = getattr(val, "quality_score", 0.0)
+            compact["rationale"] = getattr(val, "rationale", "")[:300]
+            diff_summaries = []
+            for d in getattr(val, "diffs", [])[:5]:
+                diff_summaries.append(
+                    {
+                        "file_path": getattr(d, "file_path", ""),
+                        "search": getattr(d, "search", "")[:150],
+                        "replace": getattr(d, "replace", "")[:150],
+                    }
+                )
+            compact["diff_summaries"] = diff_summaries
             continue
         if key == "eval_result" and val is not None:
             compact["before"] = getattr(val, "before_score", 0.0)
             compact["after"] = getattr(val, "after_score", 0.0)
             compact["accepted"] = getattr(val, "accepted", False)
             compact["delta"] = getattr(val, "delta", 0.0)
+            feedback = getattr(val, "feedback", None)
+            if feedback:
+                compact["eval_feedback"] = {
+                    k: v
+                    for k, v in feedback.items()
+                    if k in ("next_focus", "insights", "causal_links")
+                }
+            continue
+        if key == "candidates_total":
+            compact["candidates_total"] = int(val)
+            continue
+        if key == "candidates_passing":
+            compact["candidates_passing"] = int(val)
+            continue
+        if key == "patterns_fixed":
+            compact["patterns_fixed"] = val
             continue
         compact[key] = val
     return compact

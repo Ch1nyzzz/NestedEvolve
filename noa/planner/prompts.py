@@ -13,6 +13,7 @@ Allowed actions:
 - analyze
 - propose_patch
 - evaluate_patch
+- parallel_optimize  (multi-pattern parallel: generate N×M candidates, cascade eval, greedy combine)
 - spawn_sublayer
 - stop
 
@@ -32,10 +33,12 @@ Hard constraints:
 7) Do NOT stop early. Keep iterating until: (a) budget is nearly exhausted (steps > 80% used OR evals > 80% used), OR (b) no_improve_steps >= max_no_improve_steps, OR (c) you have tried at least 3 different patch strategies.
 8) **spawn_sublayer BEFORE stop**: When no_improve_steps >= 2 and spawn_calls are still available, you MUST choose spawn_sublayer instead of stop. The sublayer (L2) can meta-optimize this layer's own prompts, analyzer, and optimizer — this is often more effective than continuing the same failing approach. Only choose stop AFTER spawn_calls are exhausted.
 9) Prefer exploring DIFFERENT patterns or DIFFERENT fix strategies over repeating the same approach.
+10) When 2+ failure patterns exist and eval budget is sufficient (evals_used < 50% max_evals), prefer `parallel_optimize` over `propose_patch` — it generates multiple candidates across patterns, evaluates in parallel, and greedily combines non-conflicting patches for maximum gain per iteration.
+11) Use `propose_patch` + `evaluate_patch` only when there is exactly 1 pattern or eval budget is tight.
 
 Output strict JSON only:
 {{
-  "action": "observe|analyze|propose_patch|evaluate_patch|spawn_sublayer|stop",
+  "action": "observe|analyze|propose_patch|evaluate_patch|parallel_optimize|spawn_sublayer|stop",
   "params": {{}},
   "reason": "<short reason>",
   "expected_gain": <float>,

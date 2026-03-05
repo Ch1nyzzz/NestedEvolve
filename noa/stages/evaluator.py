@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
 import traceback
 from typing import Callable
 
+from utils.llm import llm_call, resolve_model
 from noa.core.protocol import DeltaPatch, EvalResult, SourceFile
 from noa.diff_utils import (
     apply_diffs_in_memory,
@@ -30,6 +32,7 @@ def evaluate(
     n_samples: int = 20,
     seed: int = 42,
     layer_context=None,
+    auto_commit: bool = True,
 ) -> EvalResult:
     """级联评估：Stage1 语法检查 → Stage2 烟雾测试 → Stage3 全量评估。"""
     rng = random.Random(seed)
@@ -103,7 +106,7 @@ def evaluate(
         details = result.get("details", [])
 
         accepted = after_score > baseline_score
-        if accepted:
+        if accepted and auto_commit:
             commit_to_source(modified_files, source_dir, layer_context=layer_context)
 
         # 构建结构化 artifacts
@@ -153,3 +156,118 @@ def evaluate(
         parent_dir = os.path.dirname(parent)
         if os.path.basename(parent_dir).startswith("noa_eval_"):
             shutil.rmtree(parent_dir, ignore_errors=True)
+
+
+def generate_eval_feedback(
+    eval_result: EvalResult,
+    baseline_details: list[dict],
+    model: str = resolve_model("gpt-4.1-mini"),
+) -> dict:
+    """用 LLM 分析 patch 评估前后的样本级变化，生成结构化反馈。"""
+    if not eval_result.details or not baseline_details:
+        return {}
+
+    # 构建 before/after 对比表
+    before_map = {d.get("question", ""): d.get("f1", 0) for d in baseline_details}
+    comparison = []
+    for d in eval_result.details:
+        q = d.get("question", "")
+        after_f1 = d.get("f1", 0)
+        before_f1 = before_map.get(q, 0)
+        delta = after_f1 - before_f1
+        if abs(delta) > 0.05:
+            comparison.append(
+                {
+                    "question": q[:100],
+                    "before_f1": round(before_f1, 3),
+                    "after_f1": round(after_f1, 3),
+                    "delta": round(delta, 3),
+                }
+            )
+
+    if not comparison:
+        return {
+            "summary": "No significant sample-level changes.",
+            "improved": [],
+            "degraded": [],
+            "insights": [],
+        }
+
+    comparison.sort(key=lambda x: x["delta"])
+    prompt = (
+        "Analyze the per-sample F1 changes after a code patch was applied.\n\n"
+        f"Patch rationale: {eval_result.patch.rationale if eval_result.patch else 'N/A'}\n"
+        f"Overall: before={eval_result.before_score:.2f}, after={eval_result.after_score:.2f}, "
+        f"accepted={eval_result.accepted}\n\n"
+        f"Sample-level changes (sorted by delta):\n"
+        f"{json.dumps(comparison[:20], ensure_ascii=False, indent=1)}\n\n"
+        "Output JSON with:\n"
+        '1. "improved_types": list of question/task types that improved and why\n'
+        '2. "degraded_types": list of question/task types that degraded and why\n'
+        '3. "insights": specific observations about what the patch actually changed\n'
+        '4. "next_focus": what the next optimization round should focus on\n'
+        '5. "causal_links": any suspected causal relationships between patterns\n'
+    )
+    try:
+        resp = llm_call(
+            prompt,
+            model=model,
+            max_tokens=2048,
+            temperature=0,
+            system="You are an evaluation analyst. Output strict JSON.",
+        )
+        text = resp.text
+        # 提取 JSON
+        left, right = text.find("{"), text.rfind("}")
+        if left != -1 and right != -1:
+            return json.loads(text[left : right + 1])
+    except Exception:
+        pass
+    return {}
+
+
+def extract_patch_regions(
+    patch: DeltaPatch, source_files: list[SourceFile]
+) -> list[tuple[str, int, int]]:
+    """提取 patch 修改的文件区域 [(file_path, start_line, end_line), ...]。"""
+    file_map = {sf.path: sf.content for sf in source_files}
+    regions = []
+    for diff in patch.diffs:
+        content = file_map.get(diff.file_path, "")
+        if not content:
+            continue
+        idx = content.find(diff.search)
+        if idx == -1:
+            continue
+        start_line = content[:idx].count("\n")
+        end_line = start_line + diff.search.count("\n")
+        regions.append((diff.file_path, start_line, end_line))
+    return regions
+
+
+def check_patch_conflict(
+    patch_a: DeltaPatch, patch_b: DeltaPatch, source_files: list[SourceFile]
+) -> bool:
+    """检查两个 patch 是否修改重叠的代码区域。"""
+    regions_a = extract_patch_regions(patch_a, source_files)
+    regions_b = extract_patch_regions(patch_b, source_files)
+    for fa, sa, ea in regions_a:
+        for fb, sb, eb in regions_b:
+            if fa == fb and sa <= eb and ea >= sb:
+                return True
+    return False
+
+
+def merge_patches(
+    source_files: list[SourceFile], patches: list[DeltaPatch]
+) -> list[SourceFile] | None:
+    """将多个不冲突的 patch 顺序应用到 source_files，返回合并后的文件列表。"""
+    current = list(source_files)
+    for patch in patches:
+        modified = apply_diffs_in_memory(current, patch.diffs)
+        if not modified:
+            return None
+        # 更新 current 中被修改的文件
+        mod_map = {sf.path: sf for sf in modified}
+        current = [mod_map.get(sf.path, sf) for sf in current]
+    return current

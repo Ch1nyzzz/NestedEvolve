@@ -15,7 +15,13 @@ from noa.core.protocol import (
 
 
 ActionName = Literal[
-    "observe", "analyze", "propose_patch", "evaluate_patch", "spawn_sublayer", "stop"
+    "observe",
+    "analyze",
+    "propose_patch",
+    "evaluate_patch",
+    "parallel_optimize",
+    "spawn_sublayer",
+    "stop",
 ]
 
 
@@ -118,10 +124,13 @@ class PlannerState:
     diagnosis: Diagnosis | None = None
     active_pattern: dict | None = None
     candidate_patch: DeltaPatch | None = None
+    candidate_patches: list[DeltaPatch] = field(default_factory=list)  # 批量候选
     last_eval: EvalResult | None = None
     no_improve_steps: int = 0
     accepted_patches: int = 0
     history: list[dict] = field(default_factory=list)
+    eval_feedback_history: list[dict] = field(default_factory=list)  # 结构化反馈
+    baseline_details: list[dict] = field(default_factory=list)  # 基线样本级详情
     layer_context: LayerContext | None = None
     action_counts: dict[str, int] = field(
         default_factory=lambda: {
@@ -129,6 +138,7 @@ class PlannerState:
             "analyze": 0,
             "propose_patch": 0,
             "evaluate_patch": 0,
+            "parallel_optimize": 0,
             "spawn_sublayer": 0,
             "stop": 0,
         }

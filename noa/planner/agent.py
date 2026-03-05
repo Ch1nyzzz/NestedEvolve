@@ -241,6 +241,14 @@ def _heuristic_action(state: PlannerState) -> str:
         return "observe"
     if state.diagnosis is None:
         return "analyze"
+    # 多 pattern 且预算充足时优先 parallel_optimize
+    if (
+        state.diagnosis is not None
+        and len(state.diagnosis.failure_patterns) >= 2
+        and state.budget.evals_used < state.budget.max_evals * 0.5
+        and state.candidate_patch is None
+    ):
+        return "parallel_optimize"
     if state.candidate_patch is None or not state.candidate_patch.diffs:
         return "propose_patch"
     # 优先 spawn_sublayer 而非 stop
@@ -262,6 +270,7 @@ def _heuristic_action_from_text(text: str) -> str | None:
         "analyze",
         "propose_patch",
         "evaluate_patch",
+        "parallel_optimize",
         "spawn_sublayer",
         "stop",
     ):

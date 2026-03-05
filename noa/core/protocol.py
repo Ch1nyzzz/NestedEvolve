@@ -87,6 +87,7 @@ class EvalResult:
     artifacts: dict = field(default_factory=dict)
     delta: float = 0.0
     failure_reason: str | None = None
+    feedback: dict = field(default_factory=dict)  # LLM结构化反馈
 
 
 # --------------- Layer Context ---------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -203,15 +204,17 @@ run_l1_subprocess = run_layer_subprocess
 
 def serialize_dataset(dataset: list, cache_dir: str | None = None) -> str:
     """将 dataset 序列化为 pickle 文件，返回路径。"""
+    dataset_blob = pickle.dumps(dataset, protocol=pickle.HIGHEST_PROTOCOL)
+    digest = hashlib.sha256(dataset_blob).hexdigest()[:16]
+
     if cache_dir:
         os.makedirs(cache_dir, exist_ok=True)
-        path = os.path.join(cache_dir, "dataset.pkl")
-        if os.path.exists(path):
-            return path
+        path = os.path.join(cache_dir, f"dataset_{digest}.pkl")
     else:
         fd, path = tempfile.mkstemp(prefix="noa_dataset_", suffix=".pkl")
         os.close(fd)
 
-    with open(path, "wb") as f:
-        pickle.dump(dataset, f)
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(dataset_blob)
     return path

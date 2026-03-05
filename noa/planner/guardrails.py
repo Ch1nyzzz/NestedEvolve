@@ -10,6 +10,7 @@ _ACTIONS = {
     "analyze",
     "propose_patch",
     "evaluate_patch",
+    "parallel_optimize",
     "spawn_sublayer",
     "stop",
 }
@@ -61,6 +62,25 @@ def validate_decision(
             if not isinstance(decision.params, dict):
                 decision.params = {}
             decision.params.setdefault("n_samples", 20)
+            return decision
+
+    if action == "parallel_optimize" and (
+        state.diagnosis is None or not state.diagnosis.failure_patterns
+    ):
+        decision.action = "analyze"
+        decision.reason = "guardrail: parallel_optimize requires diagnosis patterns"
+        decision.params = {}
+        return decision
+
+    if action == "parallel_optimize":
+        cov = state.last_intermediate_coverage
+        if cov is not None and cov < _MIN_INTERMEDIATE_COVERAGE_FOR_PATCH:
+            decision.action = "observe"
+            decision.reason = (
+                f"guardrail: intermediate coverage {cov:.0%} < {_MIN_INTERMEDIATE_COVERAGE_FOR_PATCH:.0%}; "
+                "collect/repair trajectories before patching"
+            )
+            decision.params = {}
             return decision
 
     if action == "evaluate_patch" and (
