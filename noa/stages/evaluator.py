@@ -1,4 +1,7 @@
-"""Evaluator — 级联沙盒验证 patch，决定接受或回滚。"""
+"""Evaluator — 级联沙盒验证 patch，决定接受或回滚。
+
+支持 progressive sampling: Stage 3 分批采样，提前决策减少不必要的 pipeline 执行。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,10 @@ from noa.diff_utils import (
     apply_diffs_in_memory,
     write_to_temp_dir,
     commit_to_source,
+)
+from noa.eval_guard import (
+    should_stop_early,
+    _PROGRESSIVE_FIRST_BATCH,
 )
 
 _SMOKE_SAMPLES = 3
@@ -30,8 +37,9 @@ def evaluate(
     n_samples: int = 20,
     seed: int = 42,
     layer_context=None,
+    progressive: bool = True,
 ) -> EvalResult:
-    """级联评估：Stage1 语法检查 → Stage2 烟雾测试 → Stage3 全量评估。"""
+    """级联评估：Stage1 语法检查 → Stage2 烟雾测试 → Stage3 全量评估(progressive)。"""
     rng = random.Random(seed)
     sampled = rng.sample(dataset, min(n_samples, len(dataset)))
 
@@ -97,7 +105,75 @@ def evaluate(
                 failure_reason="smoke_regression",
             )
 
-        # --- Stage 3: 全量评估 ---
+        # --- Stage 3: 全量评估 (with progressive sampling) ---
+        remaining_samples = sampled[smoke_n:]  # 排除已在 smoke 中用过的
+        total_n = len(remaining_samples)
+
+        if progressive and total_n > _PROGRESSIVE_FIRST_BATCH:
+            # Progressive: 先评一小批，看能否提前决策
+            first_batch = remaining_samples[:_PROGRESSIVE_FIRST_BATCH]
+            first_result = eval_fn(target, first_batch)
+            first_score = first_result["score"]
+            first_details = first_result.get("details", [])
+
+            early = should_stop_early(
+                first_score, baseline_score, len(first_batch), total_n
+            )
+
+            if early == "reject":
+                print(
+                    f"[Evaluator] Stage 3 EARLY REJECT: "
+                    f"batch_score={first_score:.2f} vs baseline={baseline_score:.2f} "
+                    f"(saved {total_n - len(first_batch)} samples)"
+                )
+                return EvalResult(
+                    before_score=baseline_score,
+                    after_score=first_score,
+                    accepted=False,
+                    patch=patch,
+                    details=first_details,
+                    artifacts={
+                        "stage": 3,
+                        "reason": "Progressive early reject",
+                        "smoke_score": smoke_score,
+                        "progressive_batch_score": first_score,
+                        "samples_saved": total_n - len(first_batch),
+                    },
+                    delta=first_score - baseline_score,
+                    failure_reason="no_improvement",
+                )
+
+            if early == "accept":
+                # 明确优于 baseline，直接接受
+                print(
+                    f"[Evaluator] Stage 3 EARLY ACCEPT: "
+                    f"batch_score={first_score:.2f} vs baseline={baseline_score:.2f} "
+                    f"(saved {total_n - len(first_batch)} samples)"
+                )
+                commit_to_source(modified_files, source_dir, layer_context=layer_context)
+                return EvalResult(
+                    before_score=baseline_score,
+                    after_score=first_score,
+                    accepted=True,
+                    patch=patch,
+                    details=first_details,
+                    artifacts={
+                        "stage": 3,
+                        "reason": "Progressive early accept",
+                        "smoke_score": smoke_score,
+                        "progressive_batch_score": first_score,
+                        "samples_saved": total_n - len(first_batch),
+                    },
+                    delta=first_score - baseline_score,
+                )
+
+            # 结果模糊 → 跑全量
+            print(
+                f"[Evaluator] Stage 3 progressive inconclusive "
+                f"(batch={first_score:.2f}), running full evaluation"
+            )
+
+        # Full evaluation — 用完整 sampled 集合
         result = eval_fn(target, sampled)
         after_score = result["score"]
         details = result.get("details", [])
