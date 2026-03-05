@@ -1,4 +1,4 @@
-"""Tests for noa.eval_guard — quality gate, dedup, progressive sampling."""
+"""Tests for noa.eval_guard — quality gate and dedup."""
 
 import pytest
 
@@ -7,7 +7,6 @@ from noa.eval_guard import (
     RejectedPatchTracker,
     dedup_check,
     quality_gate,
-    should_stop_early,
 )
 
 
@@ -70,13 +69,25 @@ class TestRejectedPatchTracker:
         assert is_dup is True
         assert "similarity" in reason
 
-    def test_similar_patch_detected(self):
-        tracker = RejectedPatchTracker(similarity_threshold=0.7)
+    def test_slightly_similar_patch_passes(self):
+        """similarity_threshold 默认 0.9，略有不同的 patch 不应被拦截。"""
+        tracker = RejectedPatchTracker()  # default threshold=0.9
         patch1 = _make_patch(search="old code here", replace="new code here")
         tracker.record_rejection(patch1, "no_improvement")
 
-        # slightly different but similar
-        patch2 = _make_patch(search="old code here", replace="new code here v2")
+        # different enough to be below 0.9
+        patch2 = _make_patch(search="old code here", replace="completely rewritten code block v2")
+        is_dup, _ = tracker.is_duplicate(patch2)
+        assert is_dup is False
+
+    def test_near_identical_patch_rejected(self):
+        """几乎完全相同（> 0.9）的 patch 应被拦截。"""
+        tracker = RejectedPatchTracker()
+        patch1 = _make_patch(search="old code here abc", replace="new code here xyz")
+        tracker.record_rejection(patch1, "no_improvement")
+
+        # nearly identical — only 1 char different
+        patch2 = _make_patch(search="old code here abc", replace="new code here xy!")
         is_dup, _ = tracker.is_duplicate(patch2)
         assert is_dup is True
 
@@ -112,43 +123,3 @@ class TestRejectedPatchTracker:
         patch2 = _make_patch(search="completely_unrelated", replace="brand_new_code")
         result = dedup_check(patch2, tracker, baseline_score=50.0)
         assert result is None
-
-
-# ── Progressive Sampling ─────────────────────────────────────
-
-
-class TestProgressiveSampling:
-    def test_clear_win_accepts_early(self):
-        result = should_stop_early(
-            batch_score=0.55, baseline_score=0.50,
-            batch_size=6, total_samples=20,
-        )
-        assert result == "accept"
-
-    def test_clear_loss_rejects_early(self):
-        result = should_stop_early(
-            batch_score=0.45, baseline_score=0.50,
-            batch_size=6, total_samples=20,
-        )
-        assert result == "reject"
-
-    def test_ambiguous_returns_none(self):
-        result = should_stop_early(
-            batch_score=0.505, baseline_score=0.50,
-            batch_size=6, total_samples=20,
-        )
-        assert result is None
-
-    def test_high_ratio_always_decides(self):
-        # 80%+ sample ratio → always decide
-        result = should_stop_early(
-            batch_score=0.501, baseline_score=0.50,
-            batch_size=17, total_samples=20,
-        )
-        assert result == "accept"
-
-        result = should_stop_early(
-            batch_score=0.499, baseline_score=0.50,
-            batch_size=17, total_samples=20,
-        )
-        assert result == "reject"

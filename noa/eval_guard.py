@@ -1,9 +1,8 @@
 """Eval Guard — 评测前置过滤器，减少不必要的 patch 评测。
 
-三层过滤:
+两层过滤:
 1. Quality Gate: quality_score 低于阈值的 patch 直接跳过
-2. Rejected Patch Dedup: 与历史 rejected patch diff 相似度过高则跳过
-3. Progressive Sampling: Stage 3 分批采样，提前决策
+2. Rejected Patch Dedup: 与历史 rejected patch diff 相似度 >= 0.9 则跳过
 """
 
 from __future__ import annotations
@@ -60,7 +59,7 @@ def _diff_signature(diffs: list[DiffBlock]) -> str:
 class RejectedPatchTracker:
     """跟踪已 rejected 的 patch，检测新 patch 是否与之过于相似。"""
 
-    def __init__(self, similarity_threshold: float = 0.75):
+    def __init__(self, similarity_threshold: float = 0.9):
         self.similarity_threshold = similarity_threshold
         self._rejected_signatures: list[tuple[str, str]] = []  # (signature, reason)
 
@@ -120,42 +119,3 @@ def dedup_check(
         delta=0.0,
         failure_reason="dedup_rejected",
     )
-
-
-# ── Progressive Sampling ─────────────────────────────────────
-
-
-_PROGRESSIVE_FIRST_BATCH = 6
-_PROGRESSIVE_CLEAR_WIN = 0.03   # after_score - baseline > 阈值 → 直接接受
-_PROGRESSIVE_CLEAR_LOSS = -0.02  # after_score - baseline < 阈值 → 直接拒绝
-
-
-def should_stop_early(
-    batch_score: float,
-    baseline_score: float,
-    batch_size: int,
-    total_samples: int,
-) -> str | None:
-    """判断是否可以根据部分采样结果提前决策。
-
-    Returns:
-        "accept" — 明确优于 baseline，无需继续
-        "reject" — 明确劣于 baseline，无需继续
-        None — 结果不确定，需继续采样
-    """
-    delta = batch_score - baseline_score
-
-    # 采样比例越高，置信度越高，阈值可以更宽松
-    ratio = batch_size / max(total_samples, 1)
-
-    if ratio >= 0.8:
-        # 已经采了足够多，任何差异都可信
-        return "accept" if delta > 0 else "reject"
-
-    if delta > _PROGRESSIVE_CLEAR_WIN:
-        return "accept"
-
-    if delta < _PROGRESSIVE_CLEAR_LOSS:
-        return "reject"
-
-    return None

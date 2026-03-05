@@ -273,7 +273,6 @@ class ActionExecutor(BaseActionExecutor):
             n_samples=n_samples,
             seed=seed,
             layer_context=self.layer_context,
-            progressive=True,
         )
 
         # 记录被 reject 的 patch
