@@ -11,6 +11,7 @@ from .core.protocol import (
     DiffBlock,
     DeltaPatch,
     EvalResult,
+    OptimizationBudget,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "DiffBlock",
     "DeltaPatch",
     "EvalResult",
+    "OptimizationBudget",
 ]

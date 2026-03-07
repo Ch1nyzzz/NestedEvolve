@@ -6,7 +6,7 @@ import importlib.util
 import os
 import sys
 
-from utils.llm import llm_call, resolve_model
+from utils.llm import llm_call, DEFAULT_MODEL
 from noa.core import prompts
 
 _ADAPTER_FILENAME = "_noa_adapter.py"
@@ -16,7 +16,7 @@ _MAX_RETRIES = 3
 def auto_adapt(
     source_dir: str,
     entry_hint: str = "",
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     force: bool = False,
 ) -> tuple[object, callable]:
     """扫描 source_dir 源码，用 LLM 生成 Adapter 类。
@@ -76,17 +76,6 @@ def auto_adapt(
                 raise RuntimeError(
                     f"auto_adapt 在 {_MAX_RETRIES} 次尝试后仍失败: {e}"
                 ) from e
-
-
-def make_target_factory(source_dir: str) -> callable:
-    """为已有 adapter 创建 target_factory。
-
-    target_factory(dir) 从指定目录用 importlib 全新加载 adapter。
-    """
-    adapter_path = os.path.join(os.path.abspath(source_dir), _ADAPTER_FILENAME)
-    if not os.path.exists(adapter_path):
-        raise FileNotFoundError(f"未找到 adapter 文件: {adapter_path}")
-    return _make_factory(adapter_path, source_dir)
 
 
 def _make_factory(adapter_path: str, original_source_dir: str) -> callable:
@@ -156,7 +145,7 @@ def _isolate_target_modules(source_dir: str, new_dir: str) -> dict:
             saved["removed"][name] = sys.modules.pop(name)
 
     # 2. 重定向父包 __path__（使 new_dir 的父目录优先）
-    for name, mod in sys.modules.items():
+    for name, mod in list(sys.modules.items()):
         mod_path = getattr(mod, "__path__", None)
         if not mod_path:
             continue

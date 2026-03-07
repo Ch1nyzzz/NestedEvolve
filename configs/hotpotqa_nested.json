@@ -4,33 +4,30 @@
     "split": "validation"
   },
   "optimizer": {
-    "max_steps": 30,
+    "max_steps": 50,
     "n_samples": 50,
     "eval_n_samples": 50,
     "model": "claude-haiku-4-5-20251001",
-    "max_llm_calls": 100,
-    "max_evals": 12,
-    "max_no_improve_steps": 5,
-    "max_tool_calls": 10,
-    "observer_tool_calls": 8,
-    "optimizer_tool_calls": 5
+    "max_llm_calls": 150,
+    "max_evals": 20,
+    "max_no_improve_steps": 8
   },
   "spawn": {
     "l2": {
-      "max_steps": 12,
+      "max_steps": 25,
       "n_samples": 2,
       "eval_n_samples": 2,
-      "max_llm_calls": 60,
-      "max_evals": 8,
-      "max_no_improve_steps": 4
+      "max_llm_calls": 80,
+      "max_evals": 10,
+      "max_no_improve_steps": 5
     },
     "mini_l1": {
-      "max_steps": 8,
+      "max_steps": 15,
       "n_samples": 20,
       "eval_n_samples": 20,
-      "max_llm_calls": 40,
-      "max_evals": 4,
-      "max_no_improve_steps": 3
+      "max_llm_calls": 50,
+      "max_evals": 6,
+      "max_no_improve_steps": 4
     }
   },
   "nesting": {

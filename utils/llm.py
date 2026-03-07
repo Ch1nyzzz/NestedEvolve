@@ -11,8 +11,13 @@ import litellm
 
 litellm.drop_params = True
 
-# 从环境变量读取 provider（"openai" 或 "anthropic"），默认 openai
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
+# 从环境变量读取 provider，默认 anthropic
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
+
+# VT ARC API 配置
+_VT_API_BASE = "https://llm-api.arc.vt.edu/api/v1"
+_VT_API_KEY = os.getenv("VT_API_KEY")
+_VT_DEFAULT_MODEL = "Kimi-K2.5"
 
 # 模型映射：openai 模型名 → anthropic 模型名
 _ANTHROPIC_MODEL_MAP = {
@@ -21,9 +26,12 @@ _ANTHROPIC_MODEL_MAP = {
     "gpt-4.1": "claude-haiku-4-5-20251001",
 }
 
-DEFAULT_MODEL = (
-    "gpt-5-nano" if LLM_PROVIDER == "openai" else "claude-haiku-4-5-20251001"
-)
+if LLM_PROVIDER == "openai":
+    DEFAULT_MODEL = "gpt-5-nano"
+elif LLM_PROVIDER == "vt":
+    DEFAULT_MODEL = _VT_DEFAULT_MODEL
+else:
+    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
 
 
@@ -42,9 +50,18 @@ LLM_TIMEOUT_SEC = _env_float("LLM_TIMEOUT_SEC", 120.0)
 
 def resolve_model(model: str) -> str:
     """根据 LLM_PROVIDER 将模型名映射到对应的提供商模型。"""
+    if LLM_PROVIDER == "vt":
+        return f"openai/{_VT_DEFAULT_MODEL}"
     if LLM_PROVIDER == "anthropic" and model.startswith("gpt"):
         return _ANTHROPIC_MODEL_MAP.get(model, "claude-haiku-4-5-20251001")
     return model
+
+
+def _vt_kwargs() -> dict:
+    """VT ARC API 的额外参数。"""
+    if LLM_PROVIDER == "vt":
+        return {"api_base": _VT_API_BASE, "api_key": _VT_API_KEY}
+    return {}
 
 
 @dataclass
@@ -93,6 +110,7 @@ def llm_call(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout=LLM_TIMEOUT_SEC,
+                **_vt_kwargs(),
             )
             latency = (time.time() - t0) * 1000
             return LLMResponse(
@@ -143,7 +161,7 @@ def llm_call_with_tools(
     for attempt in range(MAX_RETRIES):
         try:
             t0 = time.time()
-            resp = litellm.completion(**kwargs)
+            resp = litellm.completion(**kwargs, **_vt_kwargs())
             latency = (time.time() - t0) * 1000
             msg = resp.choices[0].message
 

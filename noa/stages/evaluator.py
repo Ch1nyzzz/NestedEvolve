@@ -9,13 +9,14 @@ import shutil
 import traceback
 from typing import Callable
 
-from utils.llm import llm_call, resolve_model
-from noa.core.protocol import DeltaPatch, EvalResult, SourceFile
+from utils.llm import llm_call, DEFAULT_MODEL
+from noa.core.protocol import DeltaPatch, EvalResult, SourceFile, StructuredPatch
 from noa.diff_utils import (
     apply_diffs_in_memory,
     write_to_temp_dir,
     commit_to_source,
 )
+from noa.patch_protocol import apply_patch_ops
 
 _SMOKE_SAMPLES = 3
 _SMOKE_THRESHOLD = 0.8  # 烟雾测试得分 < baseline * 0.8 直接拒绝
@@ -24,7 +25,7 @@ _SMOKE_THRESHOLD = 0.8  # 烟雾测试得分 < baseline * 0.8 直接拒绝
 def evaluate(
     source_files: list[SourceFile],
     source_dir: str,
-    patch: DeltaPatch,
+    patch: DeltaPatch | StructuredPatch,
     dataset: list,
     eval_fn,
     target_factory: Callable[[str], object],
@@ -39,7 +40,30 @@ def evaluate(
     sampled = rng.sample(dataset, min(n_samples, len(dataset)))
 
     # --- Stage 1: 语法检查 — diff 能否正确应用 ---
-    modified_files = apply_diffs_in_memory(source_files, patch.diffs)
+    if isinstance(patch, StructuredPatch):
+        modified_files, patch_errors, _ = apply_patch_ops(source_files, patch.ops)
+        if patch_errors:
+            print(
+                f"[Evaluator] Stage 1 FAIL: StructuredPatch 验证失败 ({len(patch_errors)} errors)"
+            )
+            return EvalResult(
+                before_score=baseline_score,
+                after_score=baseline_score,
+                accepted=False,
+                patch=patch,
+                artifacts={
+                    "stage": 1,
+                    "reason": "StructuredPatch validation failed",
+                    "errors": [
+                        {"op_index": e.op_index, "code": e.code, "message": e.message}
+                        for e in patch_errors
+                    ],
+                },
+                delta=0.0,
+                failure_reason="patch_validation_error",
+            )
+    else:
+        modified_files = apply_diffs_in_memory(source_files, patch.diffs)
     if not modified_files:
         print("[Evaluator] Stage 1 FAIL: Diff 未产生任何修改")
         return EvalResult(
@@ -161,7 +185,7 @@ def evaluate(
 def generate_eval_feedback(
     eval_result: EvalResult,
     baseline_details: list[dict],
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
 ) -> dict:
     """用 LLM 分析 patch 评估前后的样本级变化，生成结构化反馈。"""
     if not eval_result.details or not baseline_details:
@@ -243,19 +267,6 @@ def extract_patch_regions(
         end_line = start_line + diff.search.count("\n")
         regions.append((diff.file_path, start_line, end_line))
     return regions
-
-
-def check_patch_conflict(
-    patch_a: DeltaPatch, patch_b: DeltaPatch, source_files: list[SourceFile]
-) -> bool:
-    """检查两个 patch 是否修改重叠的代码区域。"""
-    regions_a = extract_patch_regions(patch_a, source_files)
-    regions_b = extract_patch_regions(patch_b, source_files)
-    for fa, sa, ea in regions_a:
-        for fb, sb, eb in regions_b:
-            if fa == fb and sa <= eb and ea >= sb:
-                return True
-    return False
 
 
 def merge_patches(

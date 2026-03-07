@@ -8,3 +8,7 @@ include = ["noa*", "utils*", "scripts*", "target_systems*"]
 
 [tool.ruff]
 src = ["."]
+
+[tool.pyright]
+include = ["."]
+extraPaths = ["."]

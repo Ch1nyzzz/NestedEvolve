@@ -77,11 +77,53 @@ class DeltaPatch:
 
 
 @dataclass
+class PatchOp:
+    """单个结构化 patch 操作。"""
+
+    op: str  # "update", "create", "delete", "insert_after", "insert_before"
+    file_path: str
+    # update: search + replace
+    search: str = ""
+    replace: str = ""
+    occurrence: int = 1
+    must_be_unique: bool = True
+    context_before: str = ""
+    context_after: str = ""
+    # create/delete: 整文件操作
+    content: str = ""
+    # insert_after/insert_before: 锚点插入
+    anchor: str = ""
+    anchor_occurrence: int = 1
+    anchor_must_be_unique: bool = True
+    new_lines: str = ""
+
+
+@dataclass
+class PatchValidationError:
+    """结构化的 patch 验证错误。"""
+
+    op_index: int
+    code: str  # file_not_found, search_not_found, search_not_unique, etc.
+    file_path: str
+    message: str
+
+
+@dataclass
+class StructuredPatch:
+    """一组 PatchOp + 元数据。事务型接口。"""
+
+    ops: list[PatchOp]
+    rationale: str
+    target_patterns: list[str] = field(default_factory=list)
+    quality_score: float = 0.0
+
+
+@dataclass
 class EvalResult:
     before_score: float
     after_score: float
     accepted: bool
-    patch: DeltaPatch | None = None
+    patch: DeltaPatch | StructuredPatch | None = None
     details: list[dict] = field(default_factory=list)
     error: str | None = None
     artifacts: dict = field(default_factory=dict)
@@ -145,7 +187,7 @@ class LayerContext:
             f"- If you see component names like 'QuestionRewriter', 'Retriever' etc. in trajectory data, "
             f"those are the TARGET SYSTEM's components that the lower-layer was trying to optimize. "
             f"Do NOT try to modify those files — they are outside your scope.\n"
-            f"- Focus on: analyzer prompts, optimizer prompts, evaluation logic, planner guardrails, "
+            f"- Focus on: analyzer prompts, optimizer prompts, evaluation logic, guardrails, "
             f"observation strategies, and other optimizer framework code."
         )
 
@@ -345,3 +387,44 @@ class FailurePool:
 
 def _severity_rank(s: str) -> int:
     return {"high": 0, "medium": 1, "low": 2}.get(s, 2)
+
+
+# --------------- Optimization Budget ---------------
+
+
+@dataclass
+class OptimizationBudget:
+    """优化预算 — 控制步数、LLM 调用、评估次数。"""
+
+    max_steps: int = 20
+    max_llm_calls: int = 80
+    max_evals: int = 12
+    max_no_improve_steps: int = 5
+    target_delta: float = float("inf")
+    max_spawn_calls: int = 2
+    step_count: int = 0
+    llm_calls_used: int = 0
+    evals_used: int = 0
+    spawn_calls_used: int = 0
+    no_improve_count: int = 0
+
+    def reached_limit(self) -> bool:
+        return (
+            self.step_count >= self.max_steps
+            or self.llm_calls_used >= self.max_llm_calls
+            or self.evals_used >= self.max_evals
+        )
+
+    def stagnation_detected(self) -> bool:
+        return self.no_improve_count >= self.max_no_improve_steps
+
+    def to_summary(self) -> dict:
+        return {
+            "steps": f"{self.step_count}/{self.max_steps}",
+            "llm_calls": f"{self.llm_calls_used}/{self.max_llm_calls}",
+            "evals": f"{self.evals_used}/{self.max_evals}",
+            "spawn_calls": f"{self.spawn_calls_used}/{self.max_spawn_calls}",
+            "max_no_improve_steps": self.max_no_improve_steps,
+            "no_improve_count": self.no_improve_count,
+            "target_delta": self.target_delta,
+        }

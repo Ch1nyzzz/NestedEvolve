@@ -5,18 +5,30 @@ from __future__ import annotations
 import json
 import logging
 
-from utils.llm import llm_call, resolve_model
-from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch
+import re
+
+from utils.llm import llm_call, DEFAULT_MODEL
+from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp
 from noa.diff_utils import extract_diffs, apply_diffs_in_memory
+from noa.patch_protocol import apply_patch_ops, validate_patch_ops
 from noa.core import prompts
 
 log = logging.getLogger(__name__)
 
 
+def _safe_int(val, default: int) -> int:
+    """容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。"""
+    if isinstance(val, int):
+        return val
+    s = str(val).strip()
+    m = re.search(r"\d+", s)
+    return int(m.group()) if m else default
+
+
 def optimize(
     sys_desc: SystemDescription,
     diagnosis: Diagnosis,
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     past_attempts: str = "",
     layer_context: str = "",
     trajectory_samples: str = "",
@@ -66,7 +78,7 @@ def optimize(
 def optimize_agentic(
     sys_desc: SystemDescription,
     diagnosis: Diagnosis,
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     past_attempts: str = "",
     layer_context: str = "",
     max_tool_calls: int = 5,
@@ -189,6 +201,24 @@ class _OptimizerProbe:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_structured_patch",
+                    "description": "Validate and dry-run a structured patch (list of PatchOp). Returns validation errors if any.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "ops": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "description": "List of PatchOp dicts with op, file_path, search, replace, etc.",
+                            },
+                        },
+                        "required": ["ops"],
+                    },
+                },
+            },
         ]
 
     def execute_tool(self, tool_name: str, arguments: dict) -> str:
@@ -219,8 +249,8 @@ class _OptimizerProbe:
             if not content:
                 return json.dumps({"error": f"File {fp} not found"})
             lines = content.split("\n")
-            start = int(arguments.get("start_line", 1)) - 1
-            end = int(arguments.get("end_line", len(lines)))
+            start = _safe_int(arguments.get("start_line", 1), 1) - 1
+            end = _safe_int(arguments.get("end_line", len(lines)), len(lines))
             selected = lines[max(0, start) : min(len(lines), end)]
             text = "\n".join(f"{i+start+1:4d} | {ln}" for i, ln in enumerate(selected))
             return text[:4000]
@@ -241,6 +271,54 @@ class _OptimizerProbe:
                 {
                     "success": False,
                     "reason": "SEARCH block did not match any content in the file",
+                }
+            )
+
+        elif tool_name == "apply_structured_patch":
+            raw_ops = arguments.get("ops", [])
+            ops = []
+            for raw in raw_ops:
+                ops.append(
+                    PatchOp(
+                        op=raw.get("op", "update"),
+                        file_path=raw.get("file_path", ""),
+                        search=raw.get("search", ""),
+                        replace=raw.get("replace", ""),
+                        occurrence=int(raw.get("occurrence", 1)),
+                        must_be_unique=bool(raw.get("must_be_unique", True)),
+                        context_before=raw.get("context_before", ""),
+                        context_after=raw.get("context_after", ""),
+                        content=raw.get("content", ""),
+                        anchor=raw.get("anchor", ""),
+                        anchor_occurrence=int(raw.get("anchor_occurrence", 1)),
+                        anchor_must_be_unique=bool(
+                            raw.get("anchor_must_be_unique", True)
+                        ),
+                        new_lines=raw.get("new_lines", ""),
+                    )
+                )
+            errors = validate_patch_ops(self.sys_desc.source_files, ops)
+            if errors:
+                return json.dumps(
+                    {
+                        "valid": False,
+                        "errors": [
+                            {
+                                "op_index": e.op_index,
+                                "code": e.code,
+                                "file_path": e.file_path,
+                                "message": e.message,
+                            }
+                            for e in errors
+                        ],
+                    }
+                )
+            modified, _, _ = apply_patch_ops(self.sys_desc.source_files, ops)
+            return json.dumps(
+                {
+                    "valid": True,
+                    "files_modified": [sf.path for sf in modified],
+                    "op_count": len(ops),
                 }
             )
 

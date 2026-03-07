@@ -6,66 +6,12 @@ import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from utils.llm import llm_call, resolve_model
+from utils.llm import llm_call, DEFAULT_MODEL
 from noa.core.protocol import SystemDescription, Trajectory, Diagnosis, FailurePool
 from noa.core import prompts
 
 log = logging.getLogger(__name__)
 _MIN_ANALYZABLE_INTERMEDIATE_COVERAGE = 0.95
-
-
-def analyze(
-    sys_desc: SystemDescription,
-    trajectories: list[Trajectory],
-    model: str = resolve_model("gpt-4.1-mini"),
-    failure_threshold: float | None = None,
-    past_attempts: str = "",
-) -> Diagnosis:
-    """分析失败轨迹 + 源码，输出结构化诊断。"""
-    if failure_threshold is None:
-        scores = sorted(t.f1 for t in trajectories)
-        failure_threshold = scores[len(scores) // 2] if scores else 0.5
-    failures = [t for t in trajectories if t.f1 < failure_threshold]
-    successes = [t for t in trajectories if t.f1 >= failure_threshold]
-
-    # 构造轨迹文本：所有失败 + 少量成功做对比
-    traj_lines = []
-    for t in failures:
-        traj_lines.append(_format_trajectory(t, label="FAIL"))
-    for t in successes[:3]:
-        traj_lines.append(_format_trajectory(t, label="OK"))
-
-    prompt = prompts.ANALYZER_PROMPT.format(
-        system_context=sys_desc.to_context_str(),
-        source_code=sys_desc.get_source_context(),
-        n_failures=len(failures),
-        n_total=len(trajectories),
-        trajectories="\n---\n".join(traj_lines) if traj_lines else "(no trajectories)",
-        trajectory_quality=_trajectory_quality_context(trajectories, failures),
-        past_attempts=past_attempts or "(none)",
-        layer_context="",
-    )
-
-    resp = llm_call(
-        prompt,
-        model=model,
-        max_tokens=16384,
-        temperature=0,
-        system=prompts.ANALYZER_SYSTEM,
-    )
-
-    patterns = _parse_patterns(resp.text)
-    summary = (
-        "; ".join(p.get("pattern", "") for p in patterns[:3])
-        if patterns
-        else "No patterns found."
-    )
-
-    return Diagnosis(
-        failure_patterns=patterns,
-        summary=summary,
-        raw_analysis=resp.text,
-    )
 
 
 def _format_trajectory(t: Trajectory, label: str) -> str:
@@ -103,7 +49,7 @@ def _format_l1_intermediate(result: dict) -> str:
     final = result.get("final_score", 0)
     baseline = result.get("baseline_score", 0)
     accepted = result.get("accepted", 0)
-    steps = result.get("planner_steps", 0)
+    steps = result.get("steps", result.get("planner_steps", 0))
     budget = result.get("budget_usage", {})
 
     lines = [
@@ -159,7 +105,7 @@ def _format_l1_intermediate(result: dict) -> str:
 def analyze_incremental(
     sys_desc: SystemDescription,
     trajectories: list[Trajectory],
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     failure_threshold: float | None = None,
     past_attempts: str = "",
     pool: FailurePool | None = None,
@@ -169,6 +115,7 @@ def analyze_incremental(
     max_tool_calls: int = 10,
     layer_context: str = "",
     eval_feedback: str = "",
+    stats: dict | None = None,
 ) -> tuple[Diagnosis, FailurePool]:
     """逐条分析失败轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
 
@@ -217,6 +164,8 @@ def analyze_incremental(
             temperature=0,
             system=prompts.SINGLE_ANALYZER_SYSTEM,
         )
+        if stats is not None:
+            stats["llm_calls"] = stats.get("llm_calls", 0) + 1
         return t, _parse_patterns(resp.text)
 
     def _diagnose_one_agentic(t: Trajectory) -> tuple[Trajectory, list[dict]]:
@@ -239,6 +188,7 @@ def analyze_incremental(
         ]
         tools = probe.get_tool_schemas()
 
+        loop_stats: dict = {}
         final_text = agentic_loop(
             messages=messages,
             tools=tools,
@@ -249,7 +199,12 @@ def analyze_incremental(
             json_retries=2,
             budget_exhausted_prompt="Tool call budget exhausted. Output your diagnosis now as JSON.",
             invalid_json_prompt="Your last response was not valid JSON list of patterns. Output ONLY valid JSON now.",
+            stats=loop_stats,
         )
+        if stats is not None:
+            stats["llm_calls"] = stats.get("llm_calls", 0) + loop_stats.get(
+                "llm_calls", 1
+            )
         return t, _parse_patterns(final_text)
 
     diagnose_fn = _diagnose_one_agentic if probe is not None else _diagnose_one_simple

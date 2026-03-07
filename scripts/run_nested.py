@@ -5,6 +5,7 @@ L1-only: 设 nesting.max_spawn_calls = 0
 """
 
 import json
+import random
 import sys
 from pathlib import Path
 
@@ -51,6 +52,11 @@ def main():
     print(f"Loading HotpotQA data (n={n})...")
     dataset = load_hotpotqa(split=data.get("split", "validation"), n=n)
 
+    # 固定验证集
+    rng = random.Random(42)
+    val_set = rng.sample(dataset, min(30, len(dataset)))
+    print(f"Validation set: {len(val_set)} samples (fixed seed=42)")
+
     # Adapter
     print("Setting up adapter...")
     adapter, target_factory = auto_adapt(source_dir=source_dir, model=model)
@@ -69,12 +75,10 @@ def main():
         l1_max_llm_calls=opt.get("max_llm_calls", 80),
         l1_max_evals=opt.get("max_evals", 12),
         l1_max_no_improve_steps=opt.get("max_no_improve_steps", 5),
-        l1_max_tool_calls=opt.get("max_tool_calls", 10),
-        l1_observer_tool_calls=opt.get("observer_tool_calls", 8),
-        l1_optimizer_tool_calls=opt.get("optimizer_tool_calls", 5),
         max_depth=nest.get("max_depth", 3),
         max_spawn_calls=nest.get("max_spawn_calls", 2),
         spawn_config=spawn,
+        val_set=val_set,
     )
     results = orch.run()
 

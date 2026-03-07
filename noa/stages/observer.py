@@ -14,7 +14,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from utils.llm import resolve_model
+from utils.llm import DEFAULT_MODEL
 from noa.core.protocol import Trajectory
 from noa.stages.agentic import agentic_loop
 
@@ -90,29 +90,6 @@ Rules:
 {layer_context}"""
 
 
-def observe(
-    target,
-    dataset: list,
-    n_samples: int = 20,
-    seed: int = 42,
-    *,
-    score_fn,
-    persist_root: str | None = None,
-    persist_tag: str = "observe",
-) -> list[Trajectory]:
-    """对采样数据运行 pipeline，收集完整执行轨迹。"""
-    trajectories = _run_fresh_observe(
-        target, dataset, n_samples=n_samples, seed=seed, score_fn=score_fn
-    )
-    _persist_trajectories(
-        trajectories,
-        persist_root=persist_root,
-        tag=persist_tag,
-        meta={"mode": "fresh", "n_samples": n_samples, "seed": seed},
-    )
-    return trajectories
-
-
 def observe_agentic(
     target,
     dataset: list,
@@ -120,7 +97,7 @@ def observe_agentic(
     seed: int = 42,
     *,
     score_fn,
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     source_dir: str | None = None,
     search_roots: list[str] | None = None,
     max_tool_calls: int = 10,
@@ -128,6 +105,7 @@ def observe_agentic(
     layer_context: str = "",
     layer_context_obj=None,
     required_intermediate_keys: list[str] | None = None,
+    stats: dict | None = None,
 ) -> list[Trajectory]:
     """Agentic observe：LLM 多轮决定“复用已有轨迹”或“运行实验获取新轨迹”。"""
     probe = _ObservationProbe(
@@ -175,6 +153,7 @@ def observe_agentic(
             no_tool_call_prompt="Continue using tools if needed, then finalize with finalize_observation.",
             json_retries=0,
             budget_exhausted_prompt="Finalize your observation strategy now.",
+            stats=stats,
         )
     except Exception:
         log.warning("Agentic observe failed, fallback to fresh observe", exc_info=True)

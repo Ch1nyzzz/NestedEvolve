@@ -27,28 +27,9 @@ def run_layer_subprocess(
     max_llm_calls: int = 80,
     max_evals: int = 12,
     max_no_improve_steps: int = 5,
-    max_tool_calls: int = 10,
-    observer_tool_calls: int = 8,
+    random_seed: int | None = None,
 ) -> dict:
-    """在子进程中运行 NOptimizer，返回结果 dict。
-
-    Args:
-        noa_dir: noa/ 目录路径（可能是临时目录中的修改版本）
-        project_root: 项目根目录（用于 import utils/ 等）
-        target_source_dir: 目标系统源码目录
-        dataset_pickle_path: pickle 序列化的 dataset 文件路径
-        layer_level: 层级（1=L1, 2=L2, ...）
-        max_steps: planner 最大步数
-        n_samples: 每次 observe 的采样数
-        model: LLM 模型名
-        timeout: 子进程超时秒数
-        isolate_source: 若为 True，在临时副本上运行，不污染原始目录
-
-    Returns:
-        {"final_score": float, "baseline_score": float, ...}
-        失败时返回 {"final_score": 0, "error": str}
-    """
-    # 隔离模式：复制 target_source_dir 到临时目录
+    """在子进程中运行 NOptimizer，返回结果 dict。"""
     temp_source_dir = None
     if isolate_source:
         import shutil
@@ -62,7 +43,6 @@ def run_layer_subprocess(
 
     noa_parent = os.path.dirname(os.path.abspath(noa_dir))
 
-    # 创建临时文件用于传递结果
     result_fd, result_file = tempfile.mkstemp(prefix="noa_result_", suffix=".json")
     os.close(result_fd)
 
@@ -108,9 +88,12 @@ def run_layer_subprocess(
             max_llm_calls={max_llm_calls},
             max_evals={max_evals},
             max_no_improve_steps={max_no_improve_steps},
-            max_tool_calls={max_tool_calls},
-            observer_max_tool_calls={observer_tool_calls},
         )
+        _seed = {random_seed!r}
+        if _seed is not None:
+            import random as _rng
+            _rng.seed(_seed)
+
         result = optimizer.run()
 
         # DiffBlock → dict 序列化
@@ -150,7 +133,6 @@ def run_layer_subprocess(
 
             shutil.rmtree(temp_source_dir, ignore_errors=True)
 
-    # 优先从临时文件读取结果
     try:
         if os.path.exists(result_file) and os.path.getsize(result_file) > 0:
             with open(result_file, "r", encoding="utf-8") as f:
@@ -161,7 +143,6 @@ def run_layer_subprocess(
         if os.path.exists(result_file):
             os.remove(result_file)
 
-    # 子进程失败 — 提取有意义的错误信息
     _NOISE_KEYWORDS = (
         "Loading weights",
         "Materializing",

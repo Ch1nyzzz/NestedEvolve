@@ -84,6 +84,51 @@ class ComponentProbe:
             current.update(result)
         return current
 
+    def reproduce(self, case_id: str, inputs: dict | None = None) -> dict:
+        """用指定输入重现失败，case_id 为 question 或唯一标识。"""
+        if inputs is None:
+            inputs = {"question": case_id}
+        # 依次运行所有组件，收集每步输出
+        results = {}
+        current = inputs if isinstance(inputs, dict) else {"input": inputs}
+        for name in self.workflow:
+            if name not in self.components:
+                results[name] = {"skipped": True}
+                continue
+            step_result = self.run_component(name, current)
+            results[name] = step_result
+            if "error" in step_result:
+                return {
+                    "error": step_result["error"],
+                    "failed_at": name,
+                    "steps": results,
+                }
+            current.update(step_result)
+        return {"steps": results, "final": current}
+
+    def inspect_artifacts(self, pattern: str, base_dir: str | None = None) -> dict:
+        """查看 eval 产生的 artifact 文件，按 pattern 匹配。"""
+        import glob
+        import os
+
+        search_dir = base_dir or os.path.dirname(
+            os.path.abspath(getattr(self, "_source_dir", ".") or ".")
+        )
+        matches = glob.glob(os.path.join(search_dir, "**", pattern), recursive=True)
+        artifacts = []
+        for path in matches[:20]:
+            try:
+                size = os.path.getsize(path)
+                rel = os.path.relpath(path, search_dir)
+                preview = ""
+                if size < 10000 and path.endswith((".json", ".jsonl", ".txt", ".log")):
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        preview = f.read(2000)
+                artifacts.append({"path": rel, "size": size, "preview": preview[:2000]})
+            except Exception:
+                continue
+        return {"count": len(matches), "artifacts": artifacts}
+
     def get_tool_schemas(self) -> list[dict]:
         """返回 OpenAI function calling 格式的工具定义。"""
         comp_names = list(self.components.keys()) if self.components else self.workflow

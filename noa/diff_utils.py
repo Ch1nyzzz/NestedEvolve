@@ -8,6 +8,7 @@ import shutil
 import tempfile
 
 from noa.core.protocol import SourceFile, DiffBlock
+from noa.patch_protocol import apply_patch_ops, validate_patch_ops  # noqa: F401 — re-export
 
 
 def _normalize_diff_path(path: str) -> str | None:

@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 
-from utils.llm import llm_call, resolve_model
+from utils.llm import llm_call, DEFAULT_MODEL
 from noa.core.protocol import SystemDescription, SourceFile
 from noa.core import prompts
 
 
 def initiate(
     source_dir: str,
-    model: str = resolve_model("gpt-4.1-mini"),
+    model: str = DEFAULT_MODEL,
     system_description: str = "",
 ) -> SystemDescription:
     """读取源码 + LLM 内省，返回结构化 SystemDescription。

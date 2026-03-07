@@ -26,6 +26,7 @@ def agentic_loop(
     parse_fn: Callable[[str], object | None] | None = None,
     early_stop_fn: Callable[[], bool] | None = None,
     no_tool_call_prompt: str | None = None,
+    stats: dict | None = None,
 ) -> str:
     """通用多轮 tool-calling 循环。
 
@@ -36,6 +37,8 @@ def agentic_loop(
     no_tool_call_prompt: 当 LLM 不调用工具且 parse_fn 失败时，追加此提示继续循环。
                          为 None 时保持现有行为（直接返回）。
     """
+    llm_call_count = 0
+
     if max_tool_calls <= 0:
         resp = llm_call_with_tools(
             messages,
@@ -44,6 +47,9 @@ def agentic_loop(
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        llm_call_count += 1
+        if stats is not None:
+            stats["llm_calls"] = llm_call_count
         return resp.text or ""
 
     calls_remaining = max_tool_calls
@@ -56,6 +62,7 @@ def agentic_loop(
         resp = llm_call_with_tools(
             messages, tools, model=model, max_tokens=max_tokens, temperature=temperature
         )
+        llm_call_count += 1
 
         if resp.tool_calls:
             tc_dicts = [
@@ -113,6 +120,7 @@ def agentic_loop(
     resp = llm_call_with_tools(
         messages, tools=[], model=model, max_tokens=max_tokens, temperature=temperature
     )
+    llm_call_count += 1
     text = resp.text or ""
 
     if parse_fn is not None:
@@ -127,6 +135,9 @@ def agentic_loop(
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            llm_call_count += 1
             text = resp.text or ""
 
+    if stats is not None:
+        stats["llm_calls"] = llm_call_count
     return text
