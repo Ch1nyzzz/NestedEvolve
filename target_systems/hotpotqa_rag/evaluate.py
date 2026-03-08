@@ -49,7 +49,7 @@ def f1_score(prediction: str, ground_truth: str) -> float:
 def evaluate_batch(
     pipeline,
     dataset: list,
-    max_workers: int = 8,
+    max_workers: int = 10,
 ) -> dict:
     """并行评估 pipeline，返回 mean_f1 + per_example 详情。"""
 
@@ -67,7 +67,9 @@ def evaluate_batch(
     details = []
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_eval_one, ex): ex for ex in dataset}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating"):
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Evaluating"
+        ):
             details.append(future.result())
 
     mean_f1 = sum(d["f1"] for d in details) / len(details) if details else 0.0

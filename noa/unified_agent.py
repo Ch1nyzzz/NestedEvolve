@@ -96,6 +96,7 @@ class UnifiedOptimizerAgent:
         self._spawn_noa_modified = False
         self._in_escape_mode = False
         self._escape_resolved = False
+        self._candidate_meta: dict[str, dict] = {}
 
     def _refresh_file_map(self):
         """刷新源文件映射，包括 readable_roots 中的只读文件。"""
@@ -147,6 +148,13 @@ class UnifiedOptimizerAgent:
             max_tokens=16384,
             early_stop_fn=self._should_stop,
             stats=loop_stats,
+            no_tool_call_prompt=(
+                "You must continue the optimization loop by calling tools. "
+                "After analyze, you should: (1) checkpoint_candidate with the patch ops, "
+                "(2) eval_candidate to measure the score, (3) accept_candidate if improved, "
+                "or try a different patch. "
+                "REMINDER: You MUST call spawn_sublayer before finish."
+            ),
         )
         self.budget.llm_calls_used += loop_stats.get("llm_calls", 0)
 
@@ -159,19 +167,15 @@ class UnifiedOptimizerAgent:
             return self._escape_resolved
         if not self.budget.reached_limit():
             return False
-        # 预算耗尽 + 停滞 + 可spawn → 进入逃生模式（持续放行直到 spawn/finish）
-        if (
-            self.budget.stagnation_detected()
-            and self.layer_context
-            and self.layer_context.can_spawn_sublayer()
-        ):
+        # 预算耗尽 + 可spawn → 进入逃生模式（持续放行直到 spawn/finish）
+        if self.layer_context and self.layer_context.can_spawn_sublayer():
             self._in_escape_mode = True
             return False
         return True
 
     def _build_result(self) -> dict:
         return {
-            "final_score": self._best_score,
+            "final_score": max(self._best_score, self._baseline_score),
             "baseline_score": self._baseline_score,
             "iterations": self._step_count,
             "accepted": self._accepted_patches,
@@ -544,6 +548,18 @@ class UnifiedOptimizerAgent:
         if name == "get_budget_status":
             return json.dumps(self.budget.to_summary(), indent=1)
         if name == "finish":
+            # 未 spawn 过且有权 spawn → 拒绝 finish，强制先 spawn
+            if (
+                self.layer_context
+                and self.layer_context.can_spawn_sublayer()
+                and self.budget.spawn_calls_used == 0
+            ):
+                return json.dumps(
+                    {
+                        "error": "Cannot finish before spawning. You MUST call spawn_sublayer at least once before finishing.",
+                        "hint": "Call spawn_sublayer now to let L2 optimize the framework, then you can finish.",
+                    }
+                )
             self._escape_resolved = True
             self.budget.step_count = self.budget.max_steps  # 触发停止
             return json.dumps(
@@ -974,6 +990,15 @@ class UnifiedOptimizerAgent:
         for i, op in enumerate(ops):
             search_preview = repr(op.search[:60]) if op.search else "''"
             print(f"  op[{i}]: {op.op} file={op.file_path} search={search_preview}")
+        ops_summary = [
+            {
+                "op": op.op,
+                "file_path": op.file_path,
+                "search": (op.search or "")[:100],
+                "replace": (op.replace or "")[:100],
+            }
+            for op in ops
+        ]
         patch = StructuredPatch(ops=ops, rationale=args.get("rationale", ""))
         candidate_dir, errors = self.sandbox.checkpoint_candidate(args["label"], patch)
         if errors:
@@ -998,8 +1023,35 @@ class UnifiedOptimizerAgent:
                                 )
                                 break
                 enriched.append(d)
+            self._history.append(
+                {
+                    "action": "checkpoint_candidate",
+                    "step": self._step_count,
+                    "label": args["label"],
+                    "ok": False,
+                    "rationale": args.get("rationale", "")[:300],
+                    "ops": ops_summary,
+                    "errors": enriched,
+                }
+            )
             return {"ok": False, "errors": enriched}
         print(f"  [Checkpoint] OK dir={candidate_dir}")
+        self._candidate_meta[args["label"]] = {
+            "label": args["label"],
+            "rationale": args.get("rationale", "")[:500],
+            "ops": ops_summary,
+            "step": self._step_count,
+        }
+        self._history.append(
+            {
+                "action": "checkpoint_candidate",
+                "step": self._step_count,
+                "label": args["label"],
+                "ok": True,
+                "rationale": args.get("rationale", "")[:300],
+                "ops": ops_summary,
+            }
+        )
         return {"ok": True, "label": args["label"], "candidate_dir": candidate_dir}
 
     def _tool_eval_candidate(self, args: dict) -> dict:
@@ -1007,37 +1059,62 @@ class UnifiedOptimizerAgent:
         candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
         if not os.path.isdir(candidate_dir):
             return {"error": f"Candidate not found: {label}"}
-        val_data = self.val_set if self.val_set else self.dataset
+        mode = args.get("mode", "full")
+        if mode == "cheap":
+            eval_size = min(10, len(self.dataset))
+            val_data = self.dataset
+            eval_n = eval_size
+            eval_seed = 42
+        else:
+            val_data = self.val_set if self.val_set else self.dataset
+            eval_n = len(val_data)
+            eval_seed = int(args.get("seed", 42))
         self.budget.evals_used += 1
         result = self.sandbox.eval_in_sandbox(
             candidate_dir,
             self.target_factory,
             self.eval_fn,
             val_data,
-            len(val_data),
-            seed=42,
+            eval_n,
+            seed=eval_seed,
         )
         score = result.get("score", result.get("mean_score", 0))
         # 归一化到 0~100，与 run_eval 保持一致
         normalized_score = score * 100 if score <= 1 else score
         self._candidate_scores[label] = normalized_score
         best_score = max(self._best_score, self._baseline_score)
-        if normalized_score > best_score:
-            self._best_score = normalized_score
-            self.budget.no_improve_count = 0
+        candidate_meta = self._candidate_meta.get(label, {})
+        accepted = normalized_score > best_score
+        # 检测 subprocess 崩溃（L2 场景）
+        subprocess_errors = result.get("subprocess_errors", [])
+        if subprocess_errors:
+            print(
+                f"\n[EvalCandidate] label={label} score={normalized_score:.2f} "
+                f"SUBPROCESS ERRORS ({len(subprocess_errors)}):"
+            )
+            for err in subprocess_errors[:2]:
+                print(f"  {err[:200]}")
         else:
-            self.budget.no_improve_count += 1
-        print(
-            f"\n[EvalCandidate] label={label} score={normalized_score:.2f} (baseline={self._baseline_score:.2f}, best={self._best_score:.2f}, current={self._current_score:.2f})"
-        )
+            print(
+                f"\n[EvalCandidate] label={label} score={normalized_score:.2f} (baseline={self._baseline_score:.2f}, best={self._best_score:.2f}, current={self._current_score:.2f})"
+            )
+        # 合并 error 信息
+        eval_error = result.get("error")
+        if not eval_error and subprocess_errors:
+            eval_error = f"subprocess_crash: {subprocess_errors[0][:300]}"
         self._history.append(
             {
                 "action": "eval_candidate",
                 "step": self._step_count,
                 "label": label,
+                "mode": mode,
+                "rationale": candidate_meta.get("rationale", ""),
+                "ops": candidate_meta.get("ops", []),
                 "before_score": round(best_score, 2),
                 "after_score": round(normalized_score, 2),
-                "accepted": normalized_score > best_score,
+                "accepted": accepted,
+                "details_count": len(result.get("details", [])),
+                "error": eval_error,
             }
         )
         return result
@@ -1054,11 +1131,15 @@ class UnifiedOptimizerAgent:
             print(
                 f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= best {best_score:.2f}"
             )
+            self.budget.no_improve_count += 1
+            candidate_meta = self._candidate_meta.get(label, {})
             self._history.append(
                 {
                     "action": "reject_candidate",
                     "step": self._step_count,
                     "label": label,
+                    "rationale": candidate_meta.get("rationale", ""),
+                    "ops": candidate_meta.get("ops", []),
                     "reason": f"score {cand_score:.2f} <= best {best_score:.2f}",
                 }
             )
@@ -1071,12 +1152,21 @@ class UnifiedOptimizerAgent:
         self._refresh_file_map()
         self.target = self.target_factory(self.source_dir)
         self._accepted_patches += 1
+        self.budget.no_improve_count = 0
         if label in self._candidate_scores:
             self._current_score = self._candidate_scores[label]
             if self._current_score > self._best_score:
                 self._best_score = self._current_score
+        candidate_meta = self._candidate_meta.get(label, {})
         self._history.append(
-            {"action": "accept_candidate", "label": label, "step": self._step_count}
+            {
+                "action": "accept_candidate",
+                "label": label,
+                "step": self._step_count,
+                "rationale": candidate_meta.get("rationale", ""),
+                "ops": candidate_meta.get("ops", []),
+                "score": cand_score,
+            }
         )
         print(
             f"  [AcceptCandidate] accepted={self._accepted_patches} new_current_score={self._current_score:.2f}"
@@ -1139,33 +1229,41 @@ class UnifiedOptimizerAgent:
 
             return target
 
-        # child eval_fn
-        def child_eval_fn(target, dataset):
-            scores, details = [], []
-            for ex in dataset:
-                result = target(ex.question)
-                s = float(result.answer) if result.answer else 0.0
-                scores.append(s)
-                details.append({"question": ex.question, "f1": s})
-            avg = sum(scores) / len(scores) if scores else 0.0
-            return {"score": avg, "details": details}
-
-        # child score_fn
-        reasonable_target = min(100, self._current_score + 20)
-
+        # child score_fn — 直接用 final_score 原始值（已是 0-100 尺度）
+        # prediction = str(final_score), ground_truth 不使用
         def child_score_fn(prediction: str, ground_truth: str) -> float:
             try:
-                pred = float(str(prediction).strip())
-                tgt = float(str(ground_truth).strip())
+                return float(str(prediction).strip()) / 100.0
             except (TypeError, ValueError):
                 return 0.0
-            return max(0.0, min(1.0, pred / tgt)) if tgt > 0 else 0.0
 
-        # child dataset
+        # child eval_fn — 与 child_score_fn 保持同一尺度
+        def child_eval_fn(target, dataset):
+            scores, details, errors = [], [], []
+            for ex in dataset:
+                result = target(ex.question)
+                raw = float(result.answer) if result.answer else 0.0
+                s = raw / 100.0  # final_score 是 0-100，归一化到 0-1
+                scores.append(s)
+                detail = {"question": ex.question, "f1": round(s, 4), "raw_score": raw}
+                inter = getattr(result, "intermediate", {}) or {}
+                if inter.get("error"):
+                    detail["error"] = inter["error"][:500]
+                    detail["error_type"] = inter.get("error_type", "unknown")
+                    errors.append(inter["error"][:500])
+                if inter.get("history"):
+                    detail["accepted"] = inter.get("accepted", 0)
+                    detail["steps"] = inter.get("steps", 0)
+                details.append(detail)
+            avg = sum(scores) / len(scores) if scores else 0.0
+            out = {"score": avg, "details": details}
+            if errors:
+                out["subprocess_errors"] = errors
+            return out
+
+        # child dataset — 每次 eval 跑 1 个完整 L1
         child_dataset = [
-            SimpleNamespace(question="opt_run_1", answer=str(reasonable_target)),
-            SimpleNamespace(question="opt_run_2", answer=str(reasonable_target)),
-            SimpleNamespace(question="opt_run_3", answer=str(reasonable_target)),
+            SimpleNamespace(question="opt_run_1", answer="0"),
         ]
 
         # parent history for L2 context
@@ -1262,6 +1360,17 @@ class UnifiedOptimizerAgent:
         )
 
     def _tool_get_state(self) -> str:
+        recent_candidate_events = [
+            h
+            for h in self._history
+            if h.get("action")
+            in (
+                "checkpoint_candidate",
+                "eval_candidate",
+                "reject_candidate",
+                "accept_candidate",
+            )
+        ][-10:]
         state = {
             "baseline_score": self._baseline_score,
             "current_score": self._current_score,
@@ -1272,6 +1381,7 @@ class UnifiedOptimizerAgent:
             "has_diagnosis": self._diagnosis is not None,
             "snapshots": self.sandbox.list_snapshots(),
             "episodes": self.traj_store.list_episodes(),
+            "recent_candidate_events": recent_candidate_events,
         }
         return json.dumps(state, indent=1)
 

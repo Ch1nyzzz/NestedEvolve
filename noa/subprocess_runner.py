@@ -21,7 +21,7 @@ def run_layer_subprocess(
     max_steps: int = 20,
     n_samples: int = 20,
     model: str = "gpt-4.1-mini",
-    timeout: int = 1200,
+    timeout: int = 4800,
     isolate_source: bool = False,
     eval_n_samples: int = 20,
     max_llm_calls: int = 80,
@@ -42,6 +42,14 @@ def run_layer_subprocess(
         target_source_dir = isolated_dir
 
     noa_parent = os.path.dirname(os.path.abspath(noa_dir))
+
+    # 若 noa_dir 不叫 "noa"（如 sandbox candidate），创建临时 symlink 确保 import 正确
+    temp_noa_link_dir = None
+    noa_basename = os.path.basename(os.path.abspath(noa_dir))
+    if noa_basename != "noa":
+        temp_noa_link_dir = tempfile.mkdtemp(prefix="noa_import_link_")
+        os.symlink(os.path.abspath(noa_dir), os.path.join(temp_noa_link_dir, "noa"))
+        noa_parent = temp_noa_link_dir
 
     result_fd, result_file = tempfile.mkstemp(prefix="noa_result_", suffix=".json")
     os.close(result_fd)
@@ -79,7 +87,7 @@ def run_layer_subprocess(
             source_dir=l0_source_dir,
             target_factory=target_factory,
             dataset=dataset,
-            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=4),
+            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=50),
             max_steps={max_steps},
             n_samples={n_samples},
             eval_n_samples={eval_n_samples},
@@ -126,12 +134,20 @@ def run_layer_subprocess(
     except subprocess.TimeoutExpired:
         if os.path.exists(result_file):
             os.remove(result_file)
+        if temp_noa_link_dir and os.path.isdir(temp_noa_link_dir):
+            import shutil
+
+            shutil.rmtree(temp_noa_link_dir, ignore_errors=True)
         return {"final_score": 0, "error": f"Subprocess timed out ({timeout}s)"}
     finally:
         if temp_source_dir and os.path.isdir(temp_source_dir):
             import shutil
 
             shutil.rmtree(temp_source_dir, ignore_errors=True)
+        if temp_noa_link_dir and os.path.isdir(temp_noa_link_dir):
+            import shutil
+
+            shutil.rmtree(temp_noa_link_dir, ignore_errors=True)
 
     try:
         if os.path.exists(result_file) and os.path.getsize(result_file) > 0:
@@ -176,7 +192,23 @@ def run_layer_subprocess(
     if not error_msg:
         error_msg = proc.stdout.strip()[-2000:] or "Unknown error"
 
-    return {"final_score": 0, "error": error_msg[:2000]}
+    # 结构化错误分类，帮助 L2 诊断
+    error_type = "unknown"
+    if "SyntaxError" in error_msg or "IndentationError" in error_msg:
+        error_type = "syntax_error"
+    elif "ImportError" in error_msg or "ModuleNotFoundError" in error_msg:
+        error_type = "import_error"
+    elif "timed out" in error_msg:
+        error_type = "timeout"
+    elif proc.returncode != 0:
+        error_type = "runtime_crash"
+
+    return {
+        "final_score": 0,
+        "error": error_msg[:2000],
+        "error_type": error_type,
+        "returncode": proc.returncode,
+    }
 
 
 # Backward compatibility alias

@@ -110,35 +110,34 @@ def analyze_incremental(
     past_attempts: str = "",
     pool: FailurePool | None = None,
     top_n: int = 10,
-    max_concurrency: int = 8,
+    max_concurrency: int = 50,
     probe=None,
     max_tool_calls: int = 10,
     layer_context: str = "",
     eval_feedback: str = "",
     stats: dict | None = None,
 ) -> tuple[Diagnosis, FailurePool]:
-    """逐条分析失败轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
+    """逐条分析全部轨迹，并行调用 LLM，累积到 FailurePool，返回 top-N pattern 的 Diagnosis。
 
     有 probe 时使用 agentic 模式（ReAct 循环 + 工具调用），无 probe 时 fallback 到单次 LLM 调用。
     """
     if pool is None:
         pool = FailurePool()
 
-    if failure_threshold is None:
-        scores = sorted(t.f1 for t in trajectories)
-        failure_threshold = scores[len(scores) // 2] if scores else 0.5
-    failures = [t for t in trajectories if t.f1 < failure_threshold]
+    # 当前策略：分析本轮 observe 的所有样本，而不是仅分析低于中位数的失败样本。
+    # 保留 failure_threshold 参数仅用于兼容旧调用方；这里不再用它筛样本。
+    analyzed = list(trajectories)
 
-    if not failures:
+    if not analyzed:
         return Diagnosis(
-            failure_patterns=[], summary="No failures.", raw_analysis=""
+            failure_patterns=[], summary="No trajectories.", raw_analysis=""
         ), pool
 
     # 快照当前 pool 状态，所有并行调用共享同一份上下文
     pool_snapshot = pool.to_context_str()
     sys_context = sys_desc.to_context_str()
     source_code = sys_desc.get_source_context()
-    trajectory_quality = _trajectory_quality_context(trajectories, failures)
+    trajectory_quality = _trajectory_quality_context(trajectories, analyzed)
 
     # 构建 eval feedback 上下文
     eval_feedback_section = ""
@@ -211,17 +210,17 @@ def analyze_incremental(
     mode_label = "agentic" if probe is not None else "simple"
 
     # 并行调用 LLM，受 max_concurrency 限制（避免 rate limit）
-    workers = min(max_concurrency, len(failures))
+    workers = min(max_concurrency, len(analyzed))
     log.info(
-        "Analyzing %d failures with %d parallel workers (%s mode)",
-        len(failures),
+        "Analyzing %d trajectories with %d parallel workers (%s mode)",
+        len(analyzed),
         workers,
         mode_label,
     )
 
     results: list[tuple[Trajectory, list[dict]]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(diagnose_fn, t): t for t in failures}
+        futures = {executor.submit(diagnose_fn, t): t for t in analyzed}
         for future in as_completed(futures):
             try:
                 results.append(future.result())
@@ -232,11 +231,11 @@ def analyze_incremental(
                 )
 
     # 按原始 failure 顺序合并到 pool（保持确定性）
-    order = {id(t): i for i, t in enumerate(failures)}
+    order = {id(t): i for i, t in enumerate(analyzed)}
     results.sort(key=lambda r: order.get(id(r[0]), 0))
     for t, patterns in results:
         pool.add(patterns, example_question=t.question)
-    obs_gap = _observability_gap_pattern(trajectories, failures)
+    obs_gap = _observability_gap_pattern(trajectories, analyzed)
     if obs_gap is not None:
         pool.add([obs_gap], example_question="(observer data quality)")
 
@@ -267,9 +266,9 @@ def analyze_incremental(
     )
 
     log.info(
-        "FailurePool: %d unique patterns from %d failures, top-%d selected",
+        "FailurePool: %d unique patterns from %d trajectories, top-%d selected",
         len(pool),
-        len(failures),
+        len(analyzed),
         min(top_n, len(pool)),
     )
 

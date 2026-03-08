@@ -4,9 +4,9 @@
     "split": "validation"
   },
   "optimizer": {
-    "max_steps": 50,
-    "n_samples": 50,
-    "eval_n_samples": 50,
+    "max_steps": 30,
+    "n_samples": 30,
+    "eval_n_samples": 30,
     "model": "claude-haiku-4-5-20251001",
     "max_llm_calls": 150,
     "max_evals": 20,
@@ -14,20 +14,20 @@
   },
   "spawn": {
     "l2": {
-      "max_steps": 25,
-      "n_samples": 2,
-      "eval_n_samples": 2,
+      "max_steps": 10,
+      "n_samples": 1,
+      "eval_n_samples": 1,
       "max_llm_calls": 80,
       "max_evals": 10,
       "max_no_improve_steps": 5
     },
     "mini_l1": {
-      "max_steps": 15,
-      "n_samples": 20,
-      "eval_n_samples": 20,
-      "max_llm_calls": 50,
-      "max_evals": 6,
-      "max_no_improve_steps": 4
+      "max_steps": 30,
+      "n_samples": 30,
+      "eval_n_samples": 30,
+      "max_llm_calls": 150,
+      "max_evals": 20,
+      "max_no_improve_steps": 8
     }
   },
   "nesting": {

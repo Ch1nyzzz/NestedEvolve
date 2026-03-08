@@ -10,7 +10,6 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-
 from noa import Orchestrator
 from noa.auto_adapter import auto_adapt
 from scripts.archive_trajectories import archive_and_reset_trajectory_dir
@@ -18,10 +17,9 @@ from target_systems.hotpotqa_rag.evaluate import evaluate_batch, f1_score
 from utils.data import load_hotpotqa
 from utils.llm import resolve_model
 
-load_dotenv()
-
 
 def main():
+    load_dotenv()
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/hotpotqa_nested.json"
     with open(config_path) as f:
         cfg = json.load(f)
@@ -66,7 +64,7 @@ def main():
         source_dir=source_dir,
         target_factory=target_factory,
         dataset=dataset,
-        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=4),
+        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=50),
         score_fn=f1_score,
         l1_max_steps=opt.get("max_steps", 20),
         l1_n_samples=opt.get("n_samples", 50),

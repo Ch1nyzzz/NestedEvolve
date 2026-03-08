@@ -106,11 +106,15 @@ class SandboxManager:
         try:
             target = target_factory(candidate_dir)
             result = eval_fn(target, sampled)
-            return {
+            out = {
                 "ok": True,
                 "score": result["score"],
                 "details": result.get("details", []),
             }
+            # 透传 subprocess 错误（L2 场景）
+            if result.get("subprocess_errors"):
+                out["subprocess_errors"] = result["subprocess_errors"]
+            return out
         except Exception as e:
             return {"ok": False, "score": 0.0, "error": str(e)[:500]}
 

@@ -13,4 +13,4 @@ if [[ ! -f "$CONFIG" ]]; then
   exit 1
 fi
 
-python3 scripts/run_nested.py "$CONFIG"
+python3 -u scripts/run_nested.py "$CONFIG"
