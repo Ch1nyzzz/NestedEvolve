@@ -22,7 +22,6 @@ class NOptimizer:
         *,
         max_steps: int = 20,
         n_samples: int = 20,
-        eval_n_samples: int = 20,
         model: str = DEFAULT_MODEL,
         system_description: str = "",
         score_fn,
@@ -34,17 +33,24 @@ class NOptimizer:
         noa_dir: str | None = None,
         dataset_pickle_path: str | None = None,
         spawn_config: dict | None = None,
-        val_set: list | None = None,
+        train_pool: list | None = None,
+        test_set: list | None = None,
+        train_sample_size: int = 25,
+        top_k: int = 3,
     ):
         self.source_dir = source_dir
         self.target_factory = target_factory
         self.dataset = dataset
         self.eval_fn = eval_fn
         self.n_samples = n_samples
-        self.eval_n_samples = eval_n_samples
+
         self.model = model
         self.system_description = system_description
         self.score_fn = score_fn
+        self.train_pool = train_pool
+        self.test_set = test_set
+        self.train_sample_size = train_sample_size
+        self.top_k = top_k
 
         max_spawn = layer_context.max_spawn_calls if layer_context else 2
         self.budget = OptimizationBudget(
@@ -60,7 +66,6 @@ class NOptimizer:
         self.noa_dir = noa_dir
         self.dataset_pickle_path = dataset_pickle_path
         self.spawn_config = spawn_config or {}
-        self.val_set = val_set
 
         self.target = target_factory(source_dir)
         self.sys_desc: SystemDescription | None = None
@@ -91,7 +96,10 @@ class NOptimizer:
         )
 
         layer_label = f"l{layer_context.level}"
-        ws_dir = os.path.join(self._project_root, ".noa_runs", f"unified_{layer_label}")
+        target_name = os.path.basename(self.source_dir.rstrip("/"))
+        ws_dir = os.path.join(
+            self._project_root, ".noa_runs", f"{target_name}_unified_{layer_label}"
+        )
         sandbox = SandboxManager(self.source_dir, ws_dir, layer_context)
         sandbox.save_accepted_snapshot()
         traj_store = TrajectoryStore(os.path.join(ws_dir, "trajectories"))
@@ -130,7 +138,11 @@ class NOptimizer:
             project_root=self._project_root,
             dataset_pickle_path=self.dataset_pickle_path,
             spawn_config=self.spawn_config,
-            val_set=self.val_set,
+            train_pool=self.train_pool,
+            test_set=self.test_set,
+            train_sample_size=self.train_sample_size,
+            n_samples=self.n_samples,
+            top_k=self.top_k,
         )
 
         result = agent.run()

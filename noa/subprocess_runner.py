@@ -23,11 +23,14 @@ def run_layer_subprocess(
     model: str = "gpt-4.1-mini",
     timeout: int = 4800,
     isolate_source: bool = False,
-    eval_n_samples: int = 20,
     max_llm_calls: int = 80,
     max_evals: int = 12,
     max_no_improve_steps: int = 5,
     random_seed: int | None = None,
+    train_pool_pickle_path: str | None = None,
+    test_set_pickle_path: str | None = None,
+    train_sample_size: int = 25,
+    top_k: int = 3,
 ) -> dict:
     """在子进程中运行 NOptimizer，返回结果 dict。"""
     temp_source_dir = None
@@ -69,6 +72,18 @@ def run_layer_subprocess(
         with open({dataset_pickle_path!r}, "rb") as f:
             dataset = pickle.load(f)
 
+        # 加载 train/test 隔离数据（如果提供）
+        train_pool = None
+        test_set = None
+        _train_path = {train_pool_pickle_path!r}
+        _test_path = {test_set_pickle_path!r}
+        if _train_path and os.path.exists(_train_path):
+            with open(_train_path, "rb") as f:
+                train_pool = pickle.load(f)
+        if _test_path and os.path.exists(_test_path):
+            with open(_test_path, "rb") as f:
+                test_set = pickle.load(f)
+
         l0_source_dir = {target_source_dir!r}
         adapter, target_factory = auto_adapt(l0_source_dir, model={model!r})
 
@@ -79,7 +94,10 @@ def run_layer_subprocess(
             eval_mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(eval_mod)
             evaluate_batch = eval_mod.evaluate_batch
-            score_fn = eval_mod.f1_score
+            # 动态获取 score_fn: 优先 f1_score，fallback exact_match
+            score_fn = getattr(eval_mod, "f1_score", None) or getattr(eval_mod, "exact_match", None)
+            if score_fn is None:
+                raise RuntimeError(f"evaluate.py at {{l0_source_dir}} has neither f1_score nor exact_match")
         else:
             raise RuntimeError(f"evaluate.py not found at {{l0_source_dir}}")
 
@@ -87,15 +105,19 @@ def run_layer_subprocess(
             source_dir=l0_source_dir,
             target_factory=target_factory,
             dataset=dataset,
-            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=50),
+            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=15),
             max_steps={max_steps},
             n_samples={n_samples},
-            eval_n_samples={eval_n_samples},
+
             model={model!r},
             score_fn=score_fn,
             max_llm_calls={max_llm_calls},
             max_evals={max_evals},
             max_no_improve_steps={max_no_improve_steps},
+            train_pool=train_pool,
+            test_set=test_set,
+            train_sample_size={train_sample_size},
+            top_k={top_k},
         )
         _seed = {random_seed!r}
         if _seed is not None:

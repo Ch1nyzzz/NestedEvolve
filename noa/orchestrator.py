@@ -27,7 +27,6 @@ class Orchestrator:
         *,
         l1_max_steps: int = 20,
         l1_n_samples: int = 20,
-        l1_eval_n_samples: int = 20,
         l1_model: str = DEFAULT_MODEL,
         l1_max_llm_calls: int = 80,
         l1_max_evals: int = 12,
@@ -35,7 +34,10 @@ class Orchestrator:
         max_depth: int = 3,
         max_spawn_calls: int = 2,
         spawn_config: dict | None = None,
-        val_set: list | None = None,
+        train_pool: list | None = None,
+        test_set: list | None = None,
+        train_sample_size: int = 25,
+        top_k: int = 3,
     ):
         self.source_dir = os.path.abspath(source_dir)
         self.target_factory = target_factory
@@ -45,7 +47,7 @@ class Orchestrator:
 
         self.l1_max_steps = l1_max_steps
         self.l1_n_samples = l1_n_samples
-        self.l1_eval_n_samples = l1_eval_n_samples
+
         self.l1_model = l1_model
         self.l1_max_llm_calls = l1_max_llm_calls
         self.l1_max_evals = l1_max_evals
@@ -54,11 +56,21 @@ class Orchestrator:
         self.max_depth = max_depth
         self.max_spawn_calls = max_spawn_calls
         self.spawn_config = spawn_config or {}
-        self.val_set = val_set
+        self.train_pool = train_pool
+        self.test_set = test_set
+        self.train_sample_size = train_sample_size
+        self.top_k = top_k
 
         self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         cache_dir = os.path.join(self.project_root, ".noa_cache")
         self.dataset_pickle_path = serialize_dataset(dataset, cache_dir=cache_dir)
+        # 序列化 train_pool / test_set 供 subprocess 使用
+        self.train_pool_pickle_path = (
+            serialize_dataset(train_pool, cache_dir=cache_dir) if train_pool else None
+        )
+        self.test_set_pickle_path = (
+            serialize_dataset(test_set, cache_dir=cache_dir) if test_set else None
+        )
 
     def run(self) -> dict:
         ws = WorkspaceManager(self.project_root, self.source_dir)
@@ -84,7 +96,6 @@ class Orchestrator:
             eval_fn=self.eval_fn,
             max_steps=self.l1_max_steps,
             n_samples=self.l1_n_samples,
-            eval_n_samples=self.l1_eval_n_samples,
             model=self.l1_model,
             score_fn=self.score_fn,
             max_llm_calls=self.l1_max_llm_calls,
@@ -94,7 +105,10 @@ class Orchestrator:
             noa_dir=ws_noa,
             dataset_pickle_path=self.dataset_pickle_path,
             spawn_config=self.spawn_config,
-            val_set=self.val_set,
+            train_pool=self.train_pool,
+            test_set=self.test_set,
+            train_sample_size=self.train_sample_size,
+            top_k=self.top_k,
         )
         result = optimizer.run()
         ws.snapshot("after_round_0")
@@ -114,11 +128,14 @@ class Orchestrator:
                 layer_level=1,
                 max_steps=self.l1_max_steps,
                 n_samples=self.l1_n_samples,
-                eval_n_samples=self.l1_eval_n_samples,
                 model=self.l1_model,
                 max_llm_calls=self.l1_max_llm_calls,
                 max_evals=self.l1_max_evals,
                 max_no_improve_steps=self.l1_max_no_improve_steps,
+                train_pool_pickle_path=self.train_pool_pickle_path,
+                test_set_pickle_path=self.test_set_pickle_path,
+                train_sample_size=self.train_sample_size,
+                top_k=self.top_k,
             )
             ws.snapshot(f"after_round_{round_num}")
             rounds.append({"round": round_num, "l1_result": result})

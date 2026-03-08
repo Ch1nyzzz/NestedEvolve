@@ -6,6 +6,7 @@
 
 import json
 import os
+import random
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,14 +47,28 @@ def main():
     source_dir = ws_source
     print(f"[L2-only] Workspace ready: {ws.run_dir}")
 
-    # 加载数据
-    n = data.get("n", 50)
-    print(f"Loading HotpotQA data (n={n})...")
-    dataset = load_hotpotqa(split=data.get("split", "validation"), n=n)
+    # 加载数据: train/test 完全隔离
+    total_n = data.get("total_n", data.get("n", 300))
+    test_n = data.get("test_n", 50)
+    train_sample_size = data.get("train_sample_size", 25)
+    print(f"Loading HotpotQA data (total={total_n})...")
+    all_data = load_hotpotqa(split=data.get("split", "validation"), n=total_n)
 
-    # 序列化 dataset
+    rng = random.Random(42)
+    test_set = rng.sample(all_data, min(test_n, len(all_data)))
+    test_ids = {id(x) for x in test_set}
+    train_pool = [x for x in all_data if id(x) not in test_ids]
+    dataset = train_pool  # dataset 传给 subprocess 的是 train_pool
+    print(f"Test set: {len(test_set)} samples (fixed seed=42)")
+    print(
+        f"Train pool: {len(train_pool)} samples (sample {train_sample_size} per round)"
+    )
+
+    # 序列化 dataset + train/test
     cache_dir = os.path.join(str(project_root), ".noa_cache")
     dpp = serialize_dataset(dataset, cache_dir=cache_dir)
+    train_pool_pp = serialize_dataset(train_pool, cache_dir=cache_dir)
+    test_set_pp = serialize_dataset(test_set, cache_dir=cache_dir)
 
     # 从上次结果构造 parent context
     l1_result = prev_results["rounds"][0]["l1_result"]
@@ -95,7 +110,6 @@ def main():
                 layer_level=1,
                 max_steps=ml1.get("max_steps", opt.get("max_steps", 50)),
                 n_samples=ml1.get("n_samples", opt.get("n_samples", 50)),
-                eval_n_samples=ml1.get("eval_n_samples", opt.get("eval_n_samples", 50)),
                 max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 150)),
                 max_evals=ml1.get("max_evals", opt.get("max_evals", 20)),
                 max_no_improve_steps=ml1.get(
@@ -104,6 +118,10 @@ def main():
                 model=model,
                 isolate_source=True,
                 random_seed=run_seed,
+                train_pool_pickle_path=train_pool_pp,
+                test_set_pickle_path=test_set_pp,
+                train_sample_size=train_sample_size,
+                top_k=opt.get("top_k", 3),
             )
             return SimpleNamespace(
                 answer=str(result.get("final_score", 0)),
@@ -178,7 +196,6 @@ def main():
         eval_fn=child_eval_fn,
         max_steps=l2_cfg.get("max_steps", 12),
         n_samples=l2_cfg.get("n_samples", 2),
-        eval_n_samples=l2_cfg.get("eval_n_samples", 2),
         model=model,
         score_fn=child_score_fn,
         max_llm_calls=l2_cfg.get("max_llm_calls", 80),
@@ -186,6 +203,8 @@ def main():
         max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 5),
         layer_context=child_layer_context,
         observer_search_roots=[noa_dir],
+        dataset_pickle_path=dpp,
+        spawn_config=spawn,
     )
 
     result = l2.run()

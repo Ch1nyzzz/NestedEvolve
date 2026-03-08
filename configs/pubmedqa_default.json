@@ -1,0 +1,22 @@
+{
+  "target": "pubmedqa",
+  "data": {
+    "total_n": 500,
+    "test_n": 50,
+    "train_sample_size": 25,
+    "split": "train"
+  },
+  "optimizer": {
+    "max_steps": 30,
+    "n_samples": 30,
+    "model": "together_ai/moonshotai/Kimi-K2.5",
+    "max_llm_calls": 150,
+    "max_evals": 20,
+    "max_no_improve_steps": 8
+  },
+  "nesting": {
+    "max_depth": 1,
+    "max_spawn_calls": 0
+  },
+  "output": null
+}

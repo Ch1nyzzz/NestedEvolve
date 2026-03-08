@@ -1,14 +1,15 @@
 {
+  "target": "pubmedqa",
   "data": {
-    "total_n": 300,
+    "total_n": 500,
     "test_n": 50,
     "train_sample_size": 25,
-    "split": "validation"
+    "split": "train"
   },
   "optimizer": {
     "max_steps": 30,
     "n_samples": 30,
-    "model": "claude-haiku-4-5-20251001",
+    "model": "together_ai/moonshotai/Kimi-K2.5",
     "max_llm_calls": 150,
     "max_evals": 20,
     "max_no_improve_steps": 8
@@ -33,5 +34,5 @@
     "max_depth": 2,
     "max_spawn_calls": 1
   },
-  "output": "results_nested.json"
+  "output": "results_pubmedqa_nested.json"
 }

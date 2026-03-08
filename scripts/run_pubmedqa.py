@@ -1,4 +1,4 @@
-"""NOA 统一入口 — 从 config JSON 读取全部参数，启动 Orchestrator。
+"""NOA 统一入口 — PubMedQA target system。
 
 L1-only: 设 nesting.max_spawn_calls = 0
 嵌套优化: 设 nesting.max_spawn_calls >= 1
@@ -13,14 +13,13 @@ from dotenv import load_dotenv
 from noa import Orchestrator
 from noa.auto_adapter import auto_adapt
 from scripts.archive_trajectories import archive_and_reset_trajectory_dir
-from target_systems.hotpotqa_rag.evaluate import evaluate_batch, f1_score
-from utils.data import load_hotpotqa
-from utils.llm import resolve_model
+from target_systems.pubmedqa.evaluate import evaluate_batch, exact_match
+from utils.data import load_pubmedqa
 
 
 def main():
     load_dotenv()
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/hotpotqa_nested.json"
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/pubmedqa_nested.json"
     with open(config_path) as f:
         cfg = json.load(f)
 
@@ -31,13 +30,11 @@ def main():
     history = cfg.get("history", {})
     output = cfg.get("output")
 
-    model = resolve_model(opt.get("model", "gpt-4.1-mini"))
+    model = opt.get("model", "together_ai/moonshotai/Kimi-K2.5")
     project_root = Path(__file__).resolve().parent.parent
-    source_dir = str(
-        Path(__file__).resolve().parent.parent / "target_systems" / "hotpotqa_rag"
-    )
+    source_dir = str(project_root / "target_systems" / "pubmedqa")
 
-    # 历史轨迹归档清理（默认执行一次）
+    # 历史轨迹归档清理
     if history.get("archive_trajectories_on_start", True):
         cleanup_result = archive_and_reset_trajectory_dir(
             str(project_root),
@@ -46,11 +43,11 @@ def main():
         print(f"Trajectory cleanup: {cleanup_result}")
 
     # 数据: train/test 完全隔离
-    total_n = data.get("total_n", 300)
+    total_n = data.get("total_n", 500)
     test_n = data.get("test_n", 50)
     train_sample_size = data.get("train_sample_size", 25)
-    print(f"Loading HotpotQA data (total={total_n})...")
-    all_data = load_hotpotqa(split=data.get("split", "validation"), n=total_n)
+    print(f"Loading PubMedQA data (total={total_n})...")
+    all_data = load_pubmedqa(split=data.get("split", "train"), n=total_n)
 
     rng = random.Random(42)
     test_set = rng.sample(all_data, min(test_n, len(all_data)))
@@ -71,15 +68,15 @@ def main():
         target_factory=target_factory,
         dataset=train_pool,
         eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=15),
-        score_fn=f1_score,
-        l1_max_steps=opt.get("max_steps", 20),
-        l1_n_samples=opt.get("n_samples", 50),
+        score_fn=exact_match,
+        l1_max_steps=opt.get("max_steps", 30),
+        l1_n_samples=opt.get("n_samples", 30),
         l1_model=model,
-        l1_max_llm_calls=opt.get("max_llm_calls", 80),
-        l1_max_evals=opt.get("max_evals", 12),
-        l1_max_no_improve_steps=opt.get("max_no_improve_steps", 5),
-        max_depth=nest.get("max_depth", 3),
-        max_spawn_calls=nest.get("max_spawn_calls", 2),
+        l1_max_llm_calls=opt.get("max_llm_calls", 150),
+        l1_max_evals=opt.get("max_evals", 20),
+        l1_max_no_improve_steps=opt.get("max_no_improve_steps", 8),
+        max_depth=nest.get("max_depth", 2),
+        max_spawn_calls=nest.get("max_spawn_calls", 1),
         spawn_config=spawn,
         train_pool=train_pool,
         test_set=test_set,
@@ -89,8 +86,8 @@ def main():
 
     # 输出
     print(f"\n{'='*60}")
-    print(f"Baseline F1:   {results['baseline_score']:.2f}")
-    print(f"Final F1:      {results['final_score']:.2f}")
+    print(f"Baseline Acc:  {results['baseline_score']:.2f}")
+    print(f"Final Acc:     {results['final_score']:.2f}")
     print(f"Improvement:   {results['final_score'] - results['baseline_score']:+.2f}")
     print(f"Total rounds:  {results['total_rounds']}")
     print(f"{'='*60}")

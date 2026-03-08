@@ -12,7 +12,7 @@ You can loop back from any step. Failed patches should be analyzed immediately.
 ## Tools
 Your tools are namespaced: {prefix}__read_source_file, {prefix}__apply_patch, etc.
 All modifications must go through {prefix}__apply_patch or {prefix}__checkpoint_candidate.
-{prefix}__accept_candidate is the ONLY way to commit changes.
+{prefix}__accept_candidate adds a candidate to the top-K pool (does NOT directly commit). The best candidate is committed via final evaluation on the held-out test set when you finish.
 
 ## Key Rules
 1. NEVER skip diagnosis. Spend most compute on understanding WHY things fail.
@@ -21,7 +21,7 @@ All modifications must go through {prefix}__apply_patch or {prefix}__checkpoint_
    a. {prefix}__dry_run_patch(ops=[...]) → verify patch is valid
    b. {prefix}__checkpoint_candidate(label, ops=[...SAME OPS...], rationale) → create isolated candidate WITH the patch applied
    c. {prefix}__eval_candidate(label) → score the candidate
-   d. {prefix}__accept_candidate(label) → commit ONLY if score improves over baseline
+   d. {prefix}__accept_candidate(label) → add to top-K pool ONLY if score improves over baseline (final commit happens at end via test set eval)
    IMPORTANT: checkpoint_candidate REQUIRES the ops parameter with the actual patch operations!
    It applies the ops to a clean copy of the source. Do NOT rely on apply_patch — pass ops directly to checkpoint_candidate.
 4. If a patch is rejected or eval shows regression, analyze why BEFORE trying again.
@@ -33,7 +33,7 @@ All modifications must go through {prefix}__apply_patch or {prefix}__checkpoint_
 6. For each observation episode, review the top 10 failure reasons from analyze before choosing patches.
 7. Stay on the SAME observation episode until you have attempted at least 5 candidate patches, unless a patch is accepted.
 8. After 3 consecutive failed candidate evaluations, re-analyze the current evidence and prior failed patches before considering a new observation episode.
-9. Use cheap candidate evaluation first when exploring alternatives. Cheap evaluation uses a fixed seed and fixed 10-case slice, so compare candidates fairly before spending full evaluations.
+9. TRAIN/TEST SPLIT: Each observe samples fresh data from the train pool. All candidate evaluations run on the SAME train samples from the current round. The system maintains a top-3 candidate pool — accept_candidate adds to this pool instead of committing directly. Final evaluation on the held-out test set happens automatically when you finish.
 10. SPAWN (MANDATORY): You MUST call spawn_sublayer BEFORE calling finish.
    spawn_sublayer launches a meta-optimizer (L2) that can improve the optimization framework itself.
    You will NOT be allowed to finish without spawning first. Plan your budget accordingly.

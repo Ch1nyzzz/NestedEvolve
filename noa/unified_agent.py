@@ -56,7 +56,11 @@ class UnifiedOptimizerAgent:
         project_root: str | None = None,
         dataset_pickle_path: str | None = None,
         spawn_config: dict | None = None,
-        val_set: list | None = None,
+        train_pool: list | None = None,
+        test_set: list | None = None,
+        train_sample_size: int = 25,
+        n_samples: int = 30,
+        top_k: int = 3,
     ):
         self.sys_desc = sys_desc
         self.source_dir = source_dir
@@ -76,7 +80,11 @@ class UnifiedOptimizerAgent:
         self.project_root = project_root
         self.dataset_pickle_path = dataset_pickle_path
         self.spawn_config = spawn_config or {}
-        self.val_set = val_set
+        self.train_pool = train_pool or dataset
+        self.test_set = test_set or dataset
+        self.train_sample_size = train_sample_size
+        self.n_samples = n_samples
+        self.top_k = top_k
 
         self.prefix = "target" if layer_context.level <= 1 else "optimizer"
         self._file_map: dict[str, str] = {}
@@ -97,6 +105,10 @@ class UnifiedOptimizerAgent:
         self._in_escape_mode = False
         self._escape_resolved = False
         self._candidate_meta: dict[str, dict] = {}
+        # 当轮训练样本 (每次 observe 时从 train_pool 随机抽取)
+        self._current_train_samples: list = []
+        # Top-K 候选池
+        self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}]
 
     def _refresh_file_map(self):
         """刷新源文件映射，包括 readable_roots 中的只读文件。"""
@@ -111,8 +123,82 @@ class UnifiedOptimizerAgent:
                 key = f"@readonly/{sf.path}"
                 self._file_map[key] = sf.content
 
+    def _compute_baseline(self):
+        """用 test_set 跑一次 baseline 分数。"""
+        try:
+            result = self.eval_fn(self.target, self.test_set)
+            score = result["score"]
+            self._baseline_score = score * 100 if score <= 1 else score
+            self._current_score = self._baseline_score
+            print(
+                f"[Baseline] test_set ({len(self.test_set)} samples) score={self._baseline_score:.2f}"
+            )
+        except Exception as e:
+            log.error(f"[Baseline] failed: {e}")
+            self._baseline_score = 0.0
+            self._current_score = 0.0
+
+    def _final_eval_top_candidates(self) -> dict | None:
+        """用 test_set 对 top-K 候选做 full eval，commit 最优的那个。"""
+        if not self._top_candidates:
+            return None
+        print(
+            f"\n[FinalEval] Evaluating top-{len(self._top_candidates)} candidates on test_set ({len(self.test_set)} samples)..."
+        )
+        best_label, best_score = None, self._baseline_score
+        for cand in self._top_candidates:
+            label = cand["label"]
+            candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+            if not os.path.isdir(candidate_dir):
+                print(f"  [FinalEval] {label}: candidate_dir missing, skip")
+                continue
+            result = self.sandbox.eval_in_sandbox(
+                candidate_dir,
+                self.target_factory,
+                self.eval_fn,
+                self.test_set,
+                len(self.test_set),
+                seed=42,
+            )
+            score = result.get("score", 0)
+            final_score = score * 100 if score <= 1 else score
+            print(
+                f"  [FinalEval] {label}: test_score={final_score:.2f} (train_score={cand['score']:.2f})"
+            )
+            if final_score > best_score:
+                best_score = final_score
+                best_label = label
+        if best_label:
+            print(
+                f"  [FinalEval] Best: {best_label} score={best_score:.2f}, committing..."
+            )
+            self.sandbox.accept_candidate(best_label)
+            self.sys_desc.source_files = collect_sources(self.source_dir)
+            self._refresh_file_map()
+            self.target = self.target_factory(self.source_dir)
+            self._best_score = best_score
+            self._current_score = best_score
+            self._accepted_patches += 1
+            self._history.append(
+                {
+                    "action": "final_eval_commit",
+                    "label": best_label,
+                    "test_score": round(best_score, 2),
+                    "baseline_score": round(self._baseline_score, 2),
+                }
+            )
+            return {"label": best_label, "test_score": best_score}
+        else:
+            print(
+                f"  [FinalEval] No candidate beats baseline ({self._baseline_score:.2f})"
+            )
+            return None
+
     def run(self) -> dict:
         """运行 unified agent 循环。"""
+        # 用 test_set 跑 baseline
+        self._compute_baseline()
+
         layer_label = self.layer_context.layer_id
         writable_name = os.path.basename(self.layer_context.writable_root.rstrip("/"))
 
@@ -126,7 +212,7 @@ class UnifiedOptimizerAgent:
 
         file_list = ", ".join(sf.path for sf in self.sys_desc.source_files)
         initial_prompt = UNIFIED_AGENT_INITIAL.format(
-            state_summary="Initial state. No observations yet.",
+            state_summary=f"Baseline score: {self._baseline_score:.2f} (on test_set, {len(self.test_set)} samples). No observations yet.",
             system_context=self.sys_desc.to_context_str(),
             source_files_list=file_list,
             layer_context=self.layer_context.to_prompt_context(),
@@ -174,8 +260,15 @@ class UnifiedOptimizerAgent:
         return True
 
     def _build_result(self) -> dict:
+        # Final eval: 用 test_set 对 top-K 候选做完整评估并 commit 最优
+        final_eval = self._final_eval_top_candidates()
+        # final_score 只取 final eval 的 test_set 结果（如果有 commit），否则回退到 baseline
+        if final_eval and final_eval.get("test_score") is not None:
+            committed_score = final_eval["test_score"]
+        else:
+            committed_score = self._baseline_score
         return {
-            "final_score": max(self._best_score, self._baseline_score),
+            "final_score": committed_score,
             "baseline_score": self._baseline_score,
             "iterations": self._step_count,
             "accepted": self._accepted_patches,
@@ -183,6 +276,11 @@ class UnifiedOptimizerAgent:
             "steps": self._step_count,
             "budget_usage": self.budget.to_summary(),
             "spawn_restart": self._spawn_noa_modified,
+            "final_eval": final_eval,
+            "top_candidates": [
+                {"label": c["label"], "train_score": c["score"]}
+                for c in self._top_candidates
+            ],
         }
 
     # --- Tool Schema Builder ---
@@ -300,7 +398,7 @@ class UnifiedOptimizerAgent:
         tools.append(
             _tool(
                 f"{p}__run_eval",
-                "Evaluate system.",
+                "Evaluate system on current train samples (NOT test set).",
                 {
                     "mode": {
                         "type": "string",
@@ -436,7 +534,7 @@ class UnifiedOptimizerAgent:
         tools.append(
             _tool(
                 f"{p}__accept_candidate",
-                "Commit a candidate to workspace (the ONLY commit path).",
+                "Add a candidate to the top-K pool if it beats baseline. Best candidate is committed via final test eval.",
                 {
                     "label": {"type": "string"},
                 },
@@ -703,13 +801,19 @@ class UnifiedOptimizerAgent:
         return {"count": len(artifacts), "artifacts": artifacts}
 
     def _tool_run_observe(self, args: dict) -> dict:
+        import random as _random
+
         from noa.stages.observer import observe_agentic
 
-        n_samples = int(args.get("n_samples", 20))
-        seed = int(args.get("seed", 42 + self._step_count))
+        # 每轮从 train_pool 随机抽取 train_sample_size 条 (seed 随 episode 递增)
+        obs_seed = 42 + self._episode_counter
+        rng = _random.Random(obs_seed)
+        n_samples = min(self.train_sample_size, len(self.train_pool))
+        self._current_train_samples = rng.sample(self.train_pool, n_samples)
+        seed = obs_seed
         trajectories = observe_agentic(
             self.target,
-            self.dataset,
+            self._current_train_samples,
             n_samples=n_samples,
             seed=seed,
             score_fn=self.score_fn,
@@ -736,9 +840,6 @@ class UnifiedOptimizerAgent:
             self.traj_store.save_episode(
                 ep_id, trajectories, {"step": self._step_count, "mean": mean}
             )
-            if self._baseline_score == 0:
-                self._baseline_score = mean
-                self._current_score = mean
             print(
                 f"\n[Observe] episode={ep_id} count={len(trajectories)} mean_score={mean:.2f}"
             )
@@ -772,7 +873,12 @@ class UnifiedOptimizerAgent:
 
         seed = int(args.get("seed", 42))
         rng = random.Random(seed)
-        samples = rng.sample(self.dataset, min(3, len(self.dataset)))
+        pool = (
+            self._current_train_samples
+            if self._current_train_samples
+            else self.train_pool
+        )
+        samples = rng.sample(pool, min(3, len(pool)))
         try:
             result = self.eval_fn(self.target, samples)
             return {"ok": True, "score": result["score"]}
@@ -780,7 +886,12 @@ class UnifiedOptimizerAgent:
             return {"ok": False, "error": str(e)[:300]}
 
     def _tool_run_eval(self, args: dict) -> dict:
-        samples = self.dataset  # 全集评测
+        # 优化过程中只用当轮 train 样本，不碰 test_set（test_set 仅用于 baseline + final eval）
+        samples = (
+            self._current_train_samples
+            if self._current_train_samples
+            else self.train_pool
+        )
         self.budget.evals_used += 1
         try:
             result = self.eval_fn(self.target, samples)
@@ -793,7 +904,7 @@ class UnifiedOptimizerAgent:
                 self.budget.no_improve_count += 1
             self._current_score = new_score
             print(
-                f"\n[Eval] score={self._current_score:.2f} (baseline={self._baseline_score:.2f})"
+                f"\n[Eval] score={self._current_score:.2f} (baseline={self._baseline_score:.2f}) [train samples, n={len(samples)}]"
             )
             self._history.append(
                 {
@@ -1054,21 +1165,36 @@ class UnifiedOptimizerAgent:
         )
         return {"ok": True, "label": args["label"], "candidate_dir": candidate_dir}
 
+    def _update_top_candidates(self, label: str, score: float):
+        """更新 top-K 候选池。"""
+        meta = self._candidate_meta.get(label, {})
+        entry = {
+            "label": label,
+            "score": score,
+            "ops": meta.get("ops", []),
+            "rationale": meta.get("rationale", ""),
+        }
+        # 检查是否已存在同 label 的候选
+        self._top_candidates = [c for c in self._top_candidates if c["label"] != label]
+        self._top_candidates.append(entry)
+        # 按分数降序排序，保留 top-K
+        self._top_candidates.sort(key=lambda c: c["score"], reverse=True)
+        self._top_candidates = self._top_candidates[: self.top_k]
+
     def _tool_eval_candidate(self, args: dict) -> dict:
         label = args["label"]
         candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
         if not os.path.isdir(candidate_dir):
             return {"error": f"Candidate not found: {label}"}
         mode = args.get("mode", "full")
-        if mode == "cheap":
-            eval_size = min(10, len(self.dataset))
-            val_data = self.dataset
-            eval_n = eval_size
-            eval_seed = 42
-        else:
-            val_data = self.val_set if self.val_set else self.dataset
-            eval_n = len(val_data)
-            eval_seed = int(args.get("seed", 42))
+        # cheap 和 full 都在当轮 train 样本上评估
+        val_data = (
+            self._current_train_samples
+            if self._current_train_samples
+            else self.train_pool
+        )
+        eval_n = len(val_data)
+        eval_seed = 42
         self.budget.evals_used += 1
         result = self.sandbox.eval_in_sandbox(
             candidate_dir,
@@ -1082,6 +1208,7 @@ class UnifiedOptimizerAgent:
         # 归一化到 0~100，与 run_eval 保持一致
         normalized_score = score * 100 if score <= 1 else score
         self._candidate_scores[label] = normalized_score
+        # 注意: 不在 eval 阶段加入 top_candidates，只在 accept_candidate 时加入
         best_score = max(self._best_score, self._baseline_score)
         candidate_meta = self._candidate_meta.get(label, {})
         accepted = normalized_score > best_score
@@ -1120,16 +1247,21 @@ class UnifiedOptimizerAgent:
         return result
 
     def _tool_accept_candidate(self, args: dict) -> dict:
+        """接受候选 — 加入 top-K 池，不直接 commit（final eval 时再 commit 最优的）。"""
         label = args["label"]
         cand_score = self._candidate_scores.get(label, 0)
-        best_score = max(self._best_score, self._baseline_score)
-        print(
-            f"\n[AcceptCandidate] label={label} candidate_score={cand_score:.2f} current={self._current_score:.2f} baseline={self._baseline_score:.2f}"
+        best_train_score = max(
+            (c["score"] for c in self._top_candidates), default=self._baseline_score
         )
-        # Guardrail: 必须严格优于当前最优才接受
-        if cand_score <= best_score:
+        print(
+            f"\n[AcceptCandidate] label={label} candidate_score={cand_score:.2f} "
+            f"baseline={self._baseline_score:.2f} best_train={best_train_score:.2f}"
+        )
+        # 检查是否已在 top-K 中
+        in_top = any(c["label"] == label for c in self._top_candidates)
+        if not in_top and cand_score <= self._baseline_score:
             print(
-                f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= best {best_score:.2f}"
+                f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= baseline {self._baseline_score:.2f}"
             )
             self.budget.no_improve_count += 1
             candidate_meta = self._candidate_meta.get(label, {})
@@ -1140,23 +1272,19 @@ class UnifiedOptimizerAgent:
                     "label": label,
                     "rationale": candidate_meta.get("rationale", ""),
                     "ops": candidate_meta.get("ops", []),
-                    "reason": f"score {cand_score:.2f} <= best {best_score:.2f}",
+                    "reason": f"score {cand_score:.2f} <= baseline {self._baseline_score:.2f}",
                 }
             )
             return {
                 "ok": False,
-                "error": f"Candidate score {cand_score:.2f} is not better than current best {best_score:.2f}. Reject.",
+                "error": f"Candidate score {cand_score:.2f} not better than baseline {self._baseline_score:.2f}. Not added to top-{self.top_k} pool.",
             }
-        self.sandbox.accept_candidate(label)
-        self.sys_desc.source_files = collect_sources(self.source_dir)
-        self._refresh_file_map()
-        self.target = self.target_factory(self.source_dir)
-        self._accepted_patches += 1
+        # 加入 top-K 池（已在 eval_candidate 时更新过，这里确认）
+        self._update_top_candidates(label, cand_score)
         self.budget.no_improve_count = 0
-        if label in self._candidate_scores:
-            self._current_score = self._candidate_scores[label]
-            if self._current_score > self._best_score:
-                self._best_score = self._current_score
+        if cand_score > self._best_score:
+            self._best_score = cand_score
+        self._current_score = cand_score
         candidate_meta = self._candidate_meta.get(label, {})
         self._history.append(
             {
@@ -1168,10 +1296,12 @@ class UnifiedOptimizerAgent:
                 "score": cand_score,
             }
         )
+        top_labels = [c["label"] for c in self._top_candidates]
         print(
-            f"  [AcceptCandidate] accepted={self._accepted_patches} new_current_score={self._current_score:.2f}"
+            f"  [AcceptCandidate] Added to top-{self.top_k} pool. "
+            f"Current pool: {top_labels}"
         )
-        return {"ok": True, "label": label}
+        return {"ok": True, "label": label, "top_candidates": top_labels}
 
     def _tool_spawn_sublayer(self, args: dict) -> dict:
         """Spawn L2 meta-optimizer to optimize noa/ framework code."""
@@ -1196,9 +1326,23 @@ class UnifiedOptimizerAgent:
 
         # dataset pickle
         dpp = self.dataset_pickle_path
+        cache_dir = os.path.join(project_root, ".noa_cache")
         if not dpp:
-            cache_dir = os.path.join(project_root, ".noa_cache")
             dpp = serialize_dataset(self.dataset, cache_dir=cache_dir)
+
+        # 序列化 train_pool / test_set 供 mini-L1 subprocess 使用
+        train_pool_pp = (
+            serialize_dataset(self.train_pool, cache_dir=cache_dir)
+            if self.train_pool
+            else None
+        )
+        test_set_pp = (
+            serialize_dataset(self.test_set, cache_dir=cache_dir)
+            if self.test_set
+            else None
+        )
+        _train_sample_size = self.train_sample_size
+        _top_k = self.top_k
 
         # child target_factory: 每个 question 跑一次 mini-L1 subprocess
         ml1 = self.spawn_config.get("mini_l1", {})
@@ -1214,13 +1358,16 @@ class UnifiedOptimizerAgent:
                     layer_level=1,
                     max_steps=ml1.get("max_steps", 8),
                     n_samples=ml1.get("n_samples", 10),
-                    eval_n_samples=ml1.get("eval_n_samples", 10),
                     max_llm_calls=ml1.get("max_llm_calls", 40),
                     max_evals=ml1.get("max_evals", 4),
                     max_no_improve_steps=ml1.get("max_no_improve_steps", 3),
                     model=self.model,
                     isolate_source=True,
                     random_seed=run_seed,
+                    train_pool_pickle_path=train_pool_pp,
+                    test_set_pickle_path=test_set_pp,
+                    train_sample_size=_train_sample_size,
+                    top_k=_top_k,
                 )
                 return SimpleNamespace(
                     answer=str(result.get("final_score", 0)),
@@ -1241,7 +1388,10 @@ class UnifiedOptimizerAgent:
         def child_eval_fn(target, dataset):
             scores, details, errors = [], [], []
             for ex in dataset:
-                result = target(ex.question)
+                kwargs = {"question": ex.question}
+                if getattr(ex, "context", ""):
+                    kwargs["context"] = ex.context
+                result = target(**kwargs)
                 raw = float(result.answer) if result.answer else 0.0
                 s = raw / 100.0  # final_score 是 0-100，归一化到 0-1
                 scores.append(s)
@@ -1303,7 +1453,6 @@ class UnifiedOptimizerAgent:
                 eval_fn=child_eval_fn,
                 max_steps=l2_cfg.get("max_steps", 12),
                 n_samples=l2_cfg.get("n_samples", 2),
-                eval_n_samples=l2_cfg.get("eval_n_samples", 2),
                 model=self.model,
                 score_fn=child_score_fn,
                 max_llm_calls=l2_cfg.get("max_llm_calls", 60),
@@ -1382,6 +1531,11 @@ class UnifiedOptimizerAgent:
             "snapshots": self.sandbox.list_snapshots(),
             "episodes": self.traj_store.list_episodes(),
             "recent_candidate_events": recent_candidate_events,
+            "top_candidates": [
+                {"label": c["label"], "train_score": c["score"]}
+                for c in self._top_candidates
+            ],
+            "train_sample_size": len(self._current_train_samples),
         }
         return json.dumps(state, indent=1)
 

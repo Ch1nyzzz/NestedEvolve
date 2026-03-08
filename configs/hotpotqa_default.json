@@ -1,12 +1,13 @@
 {
   "data": {
-    "n": 50,
+    "total_n": 300,
+    "test_n": 50,
+    "train_sample_size": 25,
     "split": "validation"
   },
   "optimizer": {
     "max_steps": 20,
     "n_samples": 50,
-    "eval_n_samples": 20,
     "model": "gpt-4.1-mini",
     "max_llm_calls": 80,
     "max_evals": 12,

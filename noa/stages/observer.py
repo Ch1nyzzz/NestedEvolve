@@ -205,11 +205,15 @@ class _ObservationProbe:
             k for k in (required_intermediate_keys or []) if isinstance(k, str) and k
         ]
         self._dataset_by_question = {}
+        self._dataset_by_question_ctx = {}
         for ex in dataset:
             q = getattr(ex, "question", None)
             a = getattr(ex, "answer", None)
             if isinstance(q, str) and q and isinstance(a, str):
                 self._dataset_by_question[q] = a
+            c = getattr(ex, "context", "")
+            if isinstance(q, str) and q and c:
+                self._dataset_by_question_ctx[q] = c
 
         self._loaded: dict[str, list[Trajectory]] = {}
         self._fresh_runs: list[list[Trajectory]] = []
@@ -643,7 +647,13 @@ class _ObservationProbe:
 
     def _replay_trajectory(self, t: Trajectory) -> Trajectory:
         try:
-            result = self.target(t.question)
+            kwargs = {"question": t.question}
+            ctx = getattr(t, "context", "") or self._dataset_by_question_ctx.get(
+                t.question, ""
+            )
+            if ctx:
+                kwargs["context"] = ctx
+            result = self.target(**kwargs)
             pred = str(getattr(result, "answer", "") or "")
             gt = t.ground_truth or self._dataset_by_question.get(t.question, "")
             score = float(self.score_fn(pred, gt)) if gt else float(t.f1)
@@ -708,7 +718,10 @@ def _run_fresh_observe(
     trajectories: list[Trajectory] = []
     for ex in sampled:
         try:
-            result = target(ex.question)
+            kwargs = {"question": ex.question}
+            if getattr(ex, "context", ""):
+                kwargs["context"] = ex.context
+            result = target(**kwargs)
             score = score_fn(result.answer, ex.answer)
             trajectories.append(
                 Trajectory(
