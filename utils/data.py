@@ -1,4 +1,4 @@
-"""数据加载 — HotpotQA (HuggingFace) + PubMedQA (本地 JSONL)。"""
+"""数据加载 — HotpotQA / PubMedQA / STaRK-Prime。"""
 
 import json
 import random
@@ -95,3 +95,29 @@ def build_corpus(split: str = "validation") -> list[str]:
             text = f"{title}: {' '.join(sentences)}"
             corpus.append(text)
     return corpus
+
+
+def load_stark_prime(
+    split: str = "train",
+    *,
+    root: str | None = None,
+    split_mode: str = "paper",
+):
+    """加载 STaRK-Prime 预处理样本。
+
+    返回的数据项由 target_systems.stark_prime.data.StarkPrimeExample 定义。
+    """
+    from target_systems.stark_prime.data import load_stark_prime
+
+    return load_stark_prime(split=split, root=root, split_mode=split_mode)
+
+
+def load_stark_prime_splits(
+    *,
+    root: str | None = None,
+    split_mode: str = "paper",
+):
+    """一次性加载 STaRK-Prime 的 train / val / test。"""
+    from target_systems.stark_prime.data import dataset_engine
+
+    return dataset_engine(root=root, split_mode=split_mode)

@@ -1,0 +1,35 @@
+{
+  "target": "stark_prime",
+  "data": {
+    "root": "target_systems/stark_prime/artifacts",
+    "split_mode": "paper",
+    "metric": "mrr",
+    "train_sample_size": 20
+  },
+  "optimizer": {
+    "max_steps": 10,
+    "n_samples": 10,
+    "model": "together_ai/moonshotai/Kimi-K2.5",
+    "max_evals": 8,
+    "max_no_improve_steps": 4
+  },
+  "spawn": {
+    "l2": {
+      "max_steps": 5,
+      "n_samples": 1,
+      "max_evals": 5,
+      "max_no_improve_steps": 3
+    },
+    "mini_l1": {
+      "max_steps": 10,
+      "n_samples": 10,
+      "max_evals": 8,
+      "max_no_improve_steps": 4
+    }
+  },
+  "nesting": {
+    "max_depth": 2,
+    "max_spawn_calls": 1
+  },
+  "output": "results_stark_prime_nested.json"
+}

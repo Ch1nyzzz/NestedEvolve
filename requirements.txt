@@ -5,3 +5,7 @@ python-dotenv
 tqdm
 scikit-learn
 sentence-transformers
+pandas
+huggingface_hub
+gdown
+stark-qa; python_version < "3.12"
