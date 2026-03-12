@@ -53,8 +53,8 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 
 _VT_API_BASE = "https://llm-api.arc.vt.edu/api/v1"
 _VT_API_KEY = os.getenv("VT_API_KEY")
-_VT_DEFAULT_MODEL = "Kimi-K2.5"
-_TOGETHER_DEFAULT_MODEL = os.getenv("TOGETHER_MODEL", "moonshotai/Kimi-K2.5")
+_VT_DEFAULT_MODEL = "MiniMax-M2.5"
+_TOGETHER_DEFAULT_MODEL = os.getenv("TOGETHER_MODEL", "MiniMaxAI/MiniMax-M2.5")
 
 _ANTHROPIC_MODEL_MAP = {
     "gpt-5-nano": "claude-haiku-4-5-20251001",
@@ -134,6 +134,20 @@ class _RateLimiter:
 
 
 _rate_limiter = _RateLimiter(RPM_LIMIT)
+
+
+def _content_chars(content) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for item in content:
+            if isinstance(item, dict):
+                total += len(str(item.get("text", "")))
+            else:
+                total += len(str(item))
+        return total
+    return len(str(content or ""))
 
 
 def resolve_model(model: str) -> str:
@@ -254,7 +268,20 @@ def _completion_with_hard_timeout(**kwargs):
     request_path = _temp_json_path(f"llm_req_{request_id}_")
     response_path = _temp_json_path(f"llm_resp_{request_id}_")
     log_path = llm_log_path(request_id)
-    request = {"request_id": request_id, "kwargs": kwargs}
+    messages = kwargs.get("messages", [])
+    request = {
+        "request_id": request_id,
+        "kwargs": kwargs,
+        "meta": {
+            "provider": LLM_PROVIDER,
+            "resolved_model": kwargs.get("model"),
+            "message_count": len(messages),
+            "tool_count": len(kwargs.get("tools", []) or []),
+            "input_chars": sum(_content_chars(msg.get("content")) for msg in messages),
+            "max_tokens": kwargs.get("max_tokens"),
+            "temperature": kwargs.get("temperature"),
+        },
+    }
     with open(request_path, "w", encoding="utf-8") as f:
         json.dump(request, f, ensure_ascii=False, default=str)
 

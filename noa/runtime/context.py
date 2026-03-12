@@ -85,6 +85,7 @@ def ensure_runtime_layout(run_dir: str | None = None) -> Path | None:
     _ensure_json_file(root / "state" / "current_run.json", {})
     _ensure_json_file(root / "state" / "children.json", [])
     _ensure_json_file(root / "state" / "heartbeats.json", [])
+    _ensure_text_file(root / "state" / "run_events.jsonl")
     return root
 
 
@@ -95,6 +96,7 @@ def install_run_context(run_id: str, run_dir: str) -> None:
     update_current_run(
         run_id=run_id,
         run_dir=run_dir,
+        pid=os.getpid(),
         status="running",
         started_at=_utc_now(),
         active_layer=None,
@@ -109,6 +111,13 @@ def _ensure_json_file(path: Path, default: Any) -> None:
     path.write_text(json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _ensure_text_file(path: Path) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+
+
 def state_path(name: str) -> str:
     root = ensure_runtime_layout()
     if root is None:
@@ -118,6 +127,10 @@ def state_path(name: str) -> str:
 
 def heartbeat_path() -> str:
     return state_path("heartbeats.json")
+
+
+def run_events_path() -> str:
+    return state_path("run_events.jsonl")
 
 
 def layer_log_path(layer_id: str) -> str:
@@ -265,6 +278,22 @@ def append_jsonl(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with _LOCK, open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def record_run_event(event: str, **fields) -> None:
+    scope = current_scope()
+    payload = {
+        "ts": _utc_now(),
+        "event": event,
+        "run_id": scope.run_id,
+        "layer_id": scope.layer_id,
+        "spawn_id": scope.spawn_id,
+        "candidate_label": scope.candidate_label,
+        "request_id": scope.request_id,
+    }
+    payload.update({k: v for k, v in fields.items() if v is not None})
+    append_jsonl(run_events_path(), payload)
+    update_current_run(last_event=event)
 
 
 def scope_env(extra: dict[str, str] | None = None) -> dict[str, str]:

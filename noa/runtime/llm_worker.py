@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import litellm
@@ -12,6 +13,10 @@ import litellm
 from noa.runtime.context import append_jsonl
 
 litellm.drop_params = True
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _classify_error(message: str) -> str:
@@ -72,6 +77,7 @@ def main(argv: list[str]) -> int:
     request_path, response_path, log_path = argv[1:]
     request = json.loads(Path(request_path).read_text(encoding="utf-8"))
     kwargs = request["kwargs"]
+    meta = request.get("meta", {})
     request_id = request.get("request_id", "")
     append_jsonl(
         log_path,
@@ -79,6 +85,14 @@ def main(argv: list[str]) -> int:
             "event": "request_started",
             "request_id": request_id,
             "model": kwargs.get("model"),
+            "provider": meta.get("provider"),
+            "resolved_model": meta.get("resolved_model"),
+            "message_count": meta.get("message_count"),
+            "tool_count": meta.get("tool_count"),
+            "input_chars": meta.get("input_chars"),
+            "max_tokens": meta.get("max_tokens"),
+            "temperature": meta.get("temperature"),
+            "ts": _utc_now(),
             "timestamp": time.time(),
         },
     )
@@ -94,7 +108,13 @@ def main(argv: list[str]) -> int:
                 "request_id": request_id,
                 "ok": True,
                 "latency_ms": payload["latency_ms"],
+                "usage": payload.get("usage", {}),
+                "prompt_tokens": payload.get("usage", {}).get("prompt_tokens"),
+                "completion_tokens": payload.get("usage", {}).get("completion_tokens"),
+                "total_tokens": payload.get("usage", {}).get("total_tokens"),
                 "finish_reason": payload.get("finish_reason", "stop"),
+                "ts": _utc_now(),
+                "timestamp": time.time(),
             },
         )
     except Exception as e:
@@ -111,8 +131,11 @@ def main(argv: list[str]) -> int:
                 "request_id": request_id,
                 "ok": False,
                 "latency_ms": payload["latency_ms"],
+                "usage": {},
                 "error_type": payload["error_type"],
                 "error": payload["error"][:500],
+                "ts": _utc_now(),
+                "timestamp": time.time(),
             },
         )
     Path(response_path).write_text(

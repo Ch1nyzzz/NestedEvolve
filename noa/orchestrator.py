@@ -9,7 +9,7 @@ from noa.engine import NOptimizer
 from noa.runtime import update_current_run
 from noa.subprocess_runner import serialize_dataset
 from noa.workspace import WorkspaceManager
-from utils.llm import DEFAULT_MODEL
+from utils.llm import DEFAULT_MODEL, LLM_PROVIDER, RPM_LIMIT
 
 
 class Orchestrator:
@@ -29,7 +29,7 @@ class Orchestrator:
         l1_max_steps: int = 20,
         l1_n_samples: int = 20,
         l1_model: str = DEFAULT_MODEL,
-        l1_max_llm_calls: int = 80,
+        l1_max_llm_calls: int = 999999,
         l1_max_evals: int = 12,
         l1_max_no_improve_steps: int = 5,
         max_depth: int = 3,
@@ -80,6 +80,12 @@ class Orchestrator:
         update_current_run(
             run_id=ws.run_id,
             run_dir=ws.run_dir,
+            pid=os.getpid(),
+            source_dir=ws_source,
+            target_name=os.path.basename(self.source_dir.rstrip("/")),
+            model=self.l1_model,
+            llm_provider=LLM_PROVIDER,
+            llm_rpm_limit=RPM_LIMIT,
             status="running",
             active_layer="L1",
             active_spawn_id=None,
@@ -134,5 +140,9 @@ class Orchestrator:
             "run_dir": ws.run_dir,
             "snapshots": ws.list_snapshots(),
         }
-        update_current_run(status="completed", active_layer=None, active_spawn_id=None)
+        update_current_run(
+            status="completed",
+            active_layer=None,
+            active_spawn_id=None,
+        )
         return payload

@@ -18,7 +18,7 @@ from noa.core.protocol import (
 )
 from noa.patch_protocol import apply_patch_ops, validate_patch_ops
 from noa.core.protocol import OptimizationBudget
-from noa.runtime import bind_scope
+from noa.runtime import bind_scope, record_run_event
 from noa.sandbox_manager import SandboxManager
 from noa.stages.agentic import agentic_loop
 from noa.stages.initiator import collect_sources
@@ -131,6 +131,8 @@ class UnifiedOptimizerAgent:
         self._current_train_baseline: float = 0.0
         # Top-K 候选池
         self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}]
+        # compact 计数器
+        self._compact_chunk_counter = 0
 
     def _refresh_file_map(self):
         """刷新源文件映射，包括 readable_roots 中的只读文件。"""
@@ -144,6 +146,218 @@ class UnifiedOptimizerAgent:
             for sf in collect_sources(root_abs):
                 key = f"@readonly/{sf.path}"
                 self._file_map[key] = sf.content
+
+    def _write_detail_file(self, filename: str, payload: dict | list) -> str:
+        """写 payload 到 source_dir/.noa_meta/{filename}，返回可被 read_source_file 读取的路径。"""
+        meta_dir = os.path.join(self.source_dir, ".noa_meta")
+        os.makedirs(meta_dir, exist_ok=True)
+        fpath = os.path.join(meta_dir, filename)
+        text = json.dumps(payload, indent=1, ensure_ascii=False, default=str)
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(text)
+        rel = ".noa_meta/" + filename
+        self._file_map[rel] = text
+        return rel
+
+    def _push_history(self, entry: dict) -> None:
+        self._history.append(entry)
+        action = entry.get("action")
+        if not action:
+            return
+        payload = {k: v for k, v in entry.items() if k != "action"}
+        record_run_event(action, **payload)
+
+    def _compact_messages(self, messages: list[dict]) -> list[dict]:
+        """压缩旧 messages: 原始记录存文件 + LLM 生成摘要 + 保留最近 KEEP_RECENT 条。
+        L2+ 层迭代少、上下文轻，跳过 compact。
+        """
+        # L2+ 层不需要 compact — 每次 spawn 都是全新 agent，messages 量小
+        if self.layer_context and self.layer_context.level >= 2:
+            return messages
+        KEEP_RECENT = 10
+        if len(messages) <= KEEP_RECENT + 2:
+            return messages
+
+        head = messages[:2]  # system + initial
+        tail = messages[-KEEP_RECENT:]
+        old = messages[2:-KEEP_RECENT]
+
+        # 确保 tail 的第一条不是孤立的 tool response
+        while tail and tail[0].get("role") == "tool" and old:
+            old.append(tail.pop(0))
+
+        if not tail:
+            return messages
+
+        # 1) 保存原始 messages 到 detail file，供 agent 按需读取
+        self._compact_chunk_counter += 1
+        chunk_id = self._compact_chunk_counter
+        # 保存完整消息（包括 tool_calls 和 tool_call_id）
+        raw_records = []
+        for m in old:
+            rec = {"role": m.get("role", ""), "content": m.get("content", "")[:4000]}
+            if m.get("tool_calls"):
+                rec["tool_calls"] = [
+                    {
+                        "name": tc["function"]["name"],
+                        "arguments": tc["function"]["arguments"][:500],
+                    }
+                    for tc in m["tool_calls"]
+                    if isinstance(tc, dict) and "function" in tc
+                ]
+            if m.get("tool_call_id"):
+                rec["tool_call_id"] = m["tool_call_id"]
+            raw_records.append(rec)
+        raw_file = self._write_detail_file(
+            f"compact_raw_{chunk_id}.json",
+            raw_records,
+        )
+
+        # 2) LLM 生成结构化摘要
+        summary = self._generate_compact_summary(old, chunk_id, raw_file)
+
+        compact_msg = {
+            "role": "user",
+            "content": summary,
+        }
+        return head + [compact_msg] + tail
+
+    def _generate_compact_summary(
+        self, old_messages: list[dict], chunk_id: int, raw_file: str
+    ) -> str:
+        """用 LLM 对被压缩的消息生成结构化摘要；失败时 fallback 到规则提取。"""
+        # 提取关键事件用于 LLM 摘要输入
+        events = []
+        for msg in old_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "assistant":
+                # agent 的推理 — 截取核心部分
+                if content.strip():
+                    events.append(f"[Agent reasoning] {content[:600]}")
+            elif role == "tool":
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        slim = {
+                            k: data[k]
+                            for k in (
+                                "action",
+                                "score",
+                                "candidate_score",
+                                "ok",
+                                "error",
+                                "label",
+                                "episode_id",
+                                "summary",
+                                "count",
+                                "candidate_label",
+                                "next_action",
+                                "top_patterns",
+                                "mean_score",
+                                "detail_file",
+                            )
+                            if k in data
+                        }
+                        if slim:
+                            events.append(
+                                f"[Tool result] {json.dumps(slim, ensure_ascii=False)}"
+                            )
+                            continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                events.append(f"[Tool result] {content[:400]}")
+
+        events_text = "\n".join(events[:40])
+
+        # 构建 LLM 摘要请求
+        prompt = (
+            "Summarize the following optimization session events into a concise structured digest.\n"
+            "Focus on: (1) what was observed/diagnosed, (2) what patches were tried and their results, "
+            "(3) key insights and lessons learned, (4) current state.\n"
+            "Output format:\n"
+            "## Observations\n- ...\n"
+            "## Patches Attempted\n- patch_label: result (score)\n"
+            "## Key Insights\n- ...\n"
+            "## Current State\nscore=X, baseline=Y\n\n"
+            f"Events:\n{events_text}"
+        )
+
+        try:
+            from utils.llm import llm_call
+
+            resp = llm_call(
+                prompt,
+                model=self.model,
+                max_tokens=800,
+                temperature=0,
+                system="You are a concise summarizer for optimization logs. Output only the structured digest.",
+            )
+            digest = resp.text.strip() if resp.text else ""
+            if len(digest) > 100:
+                # 保存摘要到文件
+                summary_file = self._write_detail_file(
+                    f"compact_summary_{chunk_id}.md", {"summary": digest}
+                )
+                return (
+                    f"[Context Compact] Earlier {len(old_messages)} messages compressed.\n\n"
+                    f"{digest}\n\n"
+                    f"Full raw messages: read_source_file(path='{raw_file}')\n"
+                    f"Summary file: read_source_file(path='{summary_file}')"
+                )
+        except Exception as e:
+            log.warning(
+                "[compact] LLM summary failed: %s, falling back to rule-based",
+                str(e)[:200],
+            )
+
+        # Fallback: 规则提取
+        return self._rule_based_compact_summary(old_messages, raw_file)
+
+    def _rule_based_compact_summary(
+        self, old_messages: list[dict], raw_file: str
+    ) -> str:
+        """规则提取摘要 — LLM 失败时的 fallback。"""
+        summary_parts = []
+        for msg in old_messages:
+            if msg.get("role") == "assistant":
+                text = msg.get("content", "").strip()
+                if text:
+                    summary_parts.append(f"[Agent] {text[:300]}")
+            elif msg.get("role") == "tool":
+                content = msg.get("content", "")
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        slim = {
+                            k: data[k]
+                            for k in (
+                                "action",
+                                "score",
+                                "candidate_score",
+                                "ok",
+                                "error",
+                                "label",
+                                "episode_id",
+                                "summary",
+                                "count",
+                            )
+                            if k in data
+                        }
+                        if slim:
+                            summary_parts.append(json.dumps(slim, ensure_ascii=False))
+                            continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                summary_parts.append(
+                    content[:400] + "..." if len(content) > 400 else content
+                )
+        return (
+            f"[Context Compact] Earlier {len(old_messages)} messages compressed. "
+            f"Key events:\n"
+            + "\n".join(summary_parts[:30])
+            + f"\n\nFull raw messages: read_source_file(path='{raw_file}')"
+        )
 
     def _compute_baseline(self):
         """用 test_set 跑一次 baseline 分数。"""
@@ -171,7 +385,7 @@ class UnifiedOptimizerAgent:
         跳过冗余 FinalEval，直接用已有分数 commit 最优候选。
         """
         if not self._top_candidates:
-            self._history.append(
+            self._push_history(
                 {
                     "action": "final_eval_skipped",
                     "step": self._step_count,
@@ -200,7 +414,7 @@ class UnifiedOptimizerAgent:
                 self._best_score = best_score
                 self._current_score = best_score
                 self._accepted_patches += 1
-                self._history.append(
+                self._push_history(
                     {
                         "action": "final_eval_commit",
                         "step": self._step_count,
@@ -217,7 +431,7 @@ class UnifiedOptimizerAgent:
                     f"\n[FinalEval] L2+ skip re-eval: no candidate beats baseline "
                     f"(best={best_score:.2f}, baseline={self._baseline_score:.2f})"
                 )
-                self._history.append(
+                self._push_history(
                     {
                         "action": "final_eval_no_commit",
                         "step": self._step_count,
@@ -266,7 +480,7 @@ class UnifiedOptimizerAgent:
             self._best_score = best_score
             self._current_score = best_score
             self._accepted_patches += 1
-            self._history.append(
+            self._push_history(
                 {
                     "action": "final_eval_commit",
                     "step": self._step_count,
@@ -281,7 +495,7 @@ class UnifiedOptimizerAgent:
             print(
                 f"  [FinalEval] No candidate beats baseline ({self._baseline_score:.2f})"
             )
-            self._history.append(
+            self._push_history(
                 {
                     "action": "final_eval_no_commit",
                     "step": self._step_count,
@@ -369,7 +583,7 @@ class UnifiedOptimizerAgent:
                 layer_level=1,
                 max_steps=ml1_cfg.get("max_steps", 8),
                 n_samples=ml1_cfg.get("n_samples", 10),
-                max_llm_calls=ml1_cfg.get("max_llm_calls", 40),
+                max_llm_calls=ml1_cfg.get("max_llm_calls", 999999),
                 max_evals=ml1_cfg.get("max_evals", 4),
                 max_no_improve_steps=ml1_cfg.get("max_no_improve_steps", 3),
                 model=self.model,
@@ -517,10 +731,13 @@ class UnifiedOptimizerAgent:
             no_tool_call_prompt=(
                 "You must continue the optimization loop by calling tools. "
                 "After analyze, you should: (1) checkpoint_candidate with the patch ops, "
-                "(2) eval_candidate to measure the score, (3) accept_candidate if improved, "
+                "(2) for deterministic fixes: accept_candidate(skip_eval=true, skip_eval_reason=...), "
+                "for behavioral changes: eval_candidate then accept_candidate if improved, "
                 "or try a different patch. "
                 "REMINDER: You MUST call spawn_sublayer before finish."
             ),
+            compact_fn=self._compact_messages,
+            compact_threshold=60,
         )
         self.budget.llm_calls_used += loop_stats.get("llm_calls", 0)
 
@@ -866,11 +1083,49 @@ class UnifiedOptimizerAgent:
         tools.append(
             _tool(
                 f"{p}__accept_candidate",
-                "Add a candidate to the top-K pool if it beats baseline. Best candidate is committed via final test eval.",
+                (
+                    "Add a candidate to the top-K pool. Best candidate is committed via final test eval. "
+                    "For DETERMINISTIC fixes (obvious bugs like wrong regex, incorrect index, clear logic errors), "
+                    "set skip_eval=true to skip expensive evaluation. "
+                    "For BEHAVIORAL changes (prompt rewording, parameter tuning, heuristic changes), "
+                    "you MUST call eval_candidate first."
+                ),
                 {
                     "label": {"type": "string"},
+                    "skip_eval": {
+                        "type": "boolean",
+                        "description": "Skip eval for deterministic bug fixes. Default false.",
+                        "default": False,
+                    },
+                    "skip_eval_reason": {
+                        "type": "string",
+                        "description": "Required when skip_eval=true. Explain why this patch is a deterministic fix that doesn't need evaluation.",
+                    },
                 },
                 required=["label"],
+            )
+        )
+
+        # E2. 候选合并
+        tools.append(
+            _tool(
+                f"{p}__merge_candidates",
+                "Merge multiple candidates into one combined candidate. "
+                "Use this to STACK patches that fix different issues — instead of picking only the best single patch, "
+                "combine several beneficial patches for a larger improvement. "
+                "The merged candidate can then be evaluated and accepted normally.",
+                {
+                    "label": {
+                        "type": "string",
+                        "description": "Label for the merged candidate",
+                    },
+                    "source_labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels of candidates to merge (must be existing checkpoint'd candidates)",
+                    },
+                },
+                required=["label", "source_labels"],
             )
         )
 
@@ -1132,8 +1387,31 @@ class UnifiedOptimizerAgent:
                         }
         return {"count": len(artifacts), "artifacts": artifacts}
 
+    def _commit_best_before_observe(self):
+        """新一轮 observe 前，commit 当前 top-K 最优候选到 source_dir 作为新 base。"""
+        if self._episode_counter == 0 or not self._top_candidates:
+            return
+        best_cand = max(self._top_candidates, key=lambda c: c["score"])
+        if best_cand["score"] <= self._baseline_score:
+            return
+        best_label = best_cand["label"]
+        self.sandbox.accept_candidate(best_label)
+        self.sys_desc.source_files = collect_sources(self.source_dir)
+        self._refresh_file_map()
+        self.target = self.target_factory(self.source_dir)
+        self._baseline_score = best_cand["score"]
+        self._top_candidates.clear()
+        self._candidate_scores.clear()
+        print(
+            f"\n[Observe] Committed best candidate '{best_label}' "
+            f"(score={best_cand['score']:.2f}) as new base for next round"
+        )
+
     def _tool_run_observe(self, args: dict) -> dict:
         import random as _random
+
+        # 新一轮前先 commit 上一轮最优，让所有后续操作（包括 L2）基于最新 base
+        self._commit_best_before_observe()
 
         # L2+: 直接从 parent_history 合成 Trajectory，不跑 mini-L1
         if (
@@ -1197,7 +1475,7 @@ class UnifiedOptimizerAgent:
             print(
                 f"\n[Observe] episode={ep_id} count={len(trajectories)} mean_score={mean:.2f}"
             )
-            self._history.append(
+            self._push_history(
                 {
                     "action": "observe",
                     "step": self._step_count,
@@ -1211,7 +1489,7 @@ class UnifiedOptimizerAgent:
                 "count": len(trajectories),
                 "mean_score": round(mean, 2),
             }
-        self._history.append(
+        self._push_history(
             {
                 "action": "observe",
                 "step": self._step_count,
@@ -1223,10 +1501,62 @@ class UnifiedOptimizerAgent:
         return {"episode_id": ep_id, "count": 0, "mean_score": 0}
 
     def _observe_from_parent_history(self) -> dict:
-        """L2+: 不做精简，返回摘要统计 + 指引 LLM 用 read_source_file 读完整历史。"""
+        """L2+: 返回摘要统计 + 指引 LLM 用 read_source_file 读完整历史。
+        第二轮+: 返回上一轮 eval/reject 摘要 + mini_l1 文件指针。"""
+        # 如果有上一轮的 eval/reject 记录，用它们代替静态 parent_history
+        eval_records = [
+            h
+            for h in self._history
+            if h.get("action") in ("eval_candidate", "reject_candidate")
+        ]
+        if eval_records:
+            self._episode_counter += 1
+            ep_id = f"ep_{self._episode_counter}"
+            self._push_history(
+                {
+                    "action": "observe",
+                    "step": self._step_count,
+                    "episode_id": ep_id,
+                    "source": "own_eval_history",
+                    "n_eval_records": len(eval_records),
+                }
+            )
+            # 收集 mini_l1 文件指针
+            mini_l1_files = [
+                f".noa_meta/mini_l1_{h['label']}.json"
+                for h in eval_records
+                if h.get("label")
+                and f".noa_meta/mini_l1_{h['label']}.json" in self._file_map
+            ]
+            slim_records = [
+                {
+                    k: h[k]
+                    for k in (
+                        "action",
+                        "step",
+                        "label",
+                        "after_score",
+                        "before_score",
+                        "accepted",
+                        "error",
+                    )
+                    if k in h
+                }
+                for h in eval_records
+            ]
+            result = {
+                "episode_id": ep_id,
+                "source": "own_eval_history",
+                "eval_summary": slim_records,
+            }
+            if mini_l1_files:
+                result["mini_l1_detail_files"] = mini_l1_files
+                result["hint"] = "read_source_file to inspect mini-L1 details"
+            return result
+
+        # 第一轮：沿用现有逻辑读 parent_history
         history = self.layer_context.parent_history
 
-        # 统计摘要
         n_evals = sum(1 for h in history if h.get("action") == "eval_candidate")
         n_accepted = sum(
             1
@@ -1235,7 +1565,6 @@ class UnifiedOptimizerAgent:
         )
         n_analyzes = sum(1 for h in history if h.get("action") == "analyze")
 
-        # 找到完整历史文件路径
         context_file = None
         for path in self.layer_context.parent_context_files:
             if "l1_parent_context" in path:
@@ -1250,7 +1579,7 @@ class UnifiedOptimizerAgent:
             f"\n[Observe-L2] parent_history: {len(history)} records "
             f"(evals={n_evals}, accepted={n_accepted}, analyzes={n_analyzes})"
         )
-        self._history.append(
+        self._push_history(
             {
                 "action": "observe",
                 "step": self._step_count,
@@ -1315,7 +1644,7 @@ class UnifiedOptimizerAgent:
             print(
                 f"\n[Eval] score={self._current_score:.2f} (baseline={self._baseline_score:.2f}) [train samples, n={len(samples)}]"
             )
-            self._history.append(
+            self._push_history(
                 {
                     "action": "eval",
                     "step": self._step_count,
@@ -1367,35 +1696,40 @@ class UnifiedOptimizerAgent:
         self._diagnosis = diagnosis
         self.budget.llm_calls_used += 1
         print(f"\n[Analyze] Summary: {diagnosis.summary[:200]}")
-        for i, pat in enumerate(diagnosis.failure_patterns[:top_n]):
+        for i, pat in enumerate(diagnosis.failure_patterns[:5]):
             print(f"  Pattern {i+1}: {pat}")
-        self._history.append(
+
+        # 精简 patterns 用于 history 和返回值
+        slim_patterns = [
+            {
+                "pattern": p.get("pattern", "") if isinstance(p, dict) else str(p),
+                "root_cause": (p.get("root_cause", "") if isinstance(p, dict) else ""),
+                "affected_file": (
+                    p.get("affected_file", "") if isinstance(p, dict) else ""
+                ),
+                "severity": (p.get("severity", "") if isinstance(p, dict) else ""),
+            }
+            for p in diagnosis.failure_patterns[:5]
+        ]
+        self._push_history(
             {
                 "action": "analyze",
                 "step": self._step_count,
-                "patterns": [
-                    {
-                        "pattern": p.get("pattern", "")
-                        if isinstance(p, dict)
-                        else str(p)[:150],
-                        "root_cause": (
-                            p.get("root_cause", "") if isinstance(p, dict) else ""
-                        ),
-                        "affected_file": (
-                            p.get("affected_file", "") if isinstance(p, dict) else ""
-                        ),
-                        "severity": (
-                            p.get("severity", "") if isinstance(p, dict) else ""
-                        ),
-                    }
-                    for p in diagnosis.failure_patterns[:top_n]
-                ],
+                "patterns": slim_patterns,
             }
         )
+        # 完整 patterns 写入 detail 文件
+        ep_id = self._episode_counter
+        detail_file = self._write_detail_file(
+            f"diagnosis_ep_{ep_id}.json",
+            diagnosis.failure_patterns[:top_n],
+        )
         return {
-            "summary": diagnosis.summary,
-            "patterns": diagnosis.failure_patterns[:top_n],
-            "pattern_count": len(diagnosis.failure_patterns),
+            "summary": diagnosis.summary[:1000],
+            "top_patterns": slim_patterns,
+            "total_pattern_count": len(diagnosis.failure_patterns),
+            "detail_file": detail_file,
+            "hint": f"read_source_file(path='{detail_file}') for all patterns",
         }
 
     def _tool_compare_episodes(self, args: dict) -> dict:
@@ -1505,6 +1839,77 @@ class UnifiedOptimizerAgent:
         self.target = self.target_factory(self.source_dir)
         return {"ok": True, "label": args["label"]}
 
+    def _tool_merge_candidates(self, args: dict) -> dict:
+        """合并多个候选 patch 为一个组合候选。"""
+        label = args["label"]
+        source_labels = args.get("source_labels", [])
+        if len(source_labels) < 2:
+            return {"ok": False, "error": "Need at least 2 source candidates to merge."}
+
+        print(f"\n[MergeCandidates] label={label} sources={source_labels}")
+        candidate_dir, conflicts = self.sandbox.merge_candidates(label, source_labels)
+        if not candidate_dir:
+            print(f"  [MergeCandidates] FAILED: {conflicts}")
+            return {"ok": False, "errors": conflicts}
+
+        # 收集源候选的元数据
+        merged_ops = []
+        merged_rationales = []
+        for src in source_labels:
+            meta = self._candidate_meta.get(src, {})
+            merged_ops.extend(meta.get("ops", []))
+            if meta.get("rationale"):
+                merged_rationales.append(f"[{src}] {meta['rationale']}")
+
+        self._candidate_meta[label] = {
+            "label": label,
+            "rationale": f"Merged from {', '.join(source_labels)}: "
+            + "; ".join(merged_rationales)[:500],
+            "ops": merged_ops,
+            "step": self._step_count,
+            "merged_from": source_labels,
+        }
+        self._push_history(
+            {
+                "action": "merge_candidates",
+                "step": self._step_count,
+                "label": label,
+                "source_labels": source_labels,
+                "ok": True,
+                "conflicts": conflicts,
+            }
+        )
+
+        # 附上源候选的已知分数供 LLM 参考
+        source_scores = {}
+        for src in source_labels:
+            if src in self._candidate_scores:
+                source_scores[src] = round(self._candidate_scores[src], 2)
+
+        result: dict = {
+            "ok": True,
+            "label": label,
+            "candidate_dir": candidate_dir,
+            "source_scores": source_scores,
+            "next_action": (
+                f"Call eval_candidate(label='{label}') to score the merged candidate. "
+                f"If it scores lower than individual candidates, accept the best single one instead."
+            ),
+        }
+        if conflicts:
+            result["conflicts"] = conflicts
+            result["note"] = (
+                "Some file regions had overlapping changes. "
+                "The first candidate's version was used for conflicts. "
+                "Eval the merge to verify correctness."
+            )
+            print(
+                f"  [MergeCandidates] OK with {len(conflicts)} conflicts: {conflicts}"
+            )
+        else:
+            print("  [MergeCandidates] OK, clean merge")
+        return result
+
     def _tool_checkpoint_candidate(self, args: dict) -> dict:
         raw_ops = args.get("ops", [])
         ops = _parse_ops(raw_ops)
@@ -1524,6 +1929,22 @@ class UnifiedOptimizerAgent:
         for i, op in enumerate(ops):
             search_preview = repr(op.search[:60]) if op.search else "''"
             print(f"  op[{i}]: {op.op} file={op.file_path} search={search_preview}")
+        full_ops = [
+            {
+                "op": op.op,
+                "file_path": op.file_path,
+                "search": op.search,
+                "replace": op.replace,
+                "content": op.content,
+                "anchor": op.anchor,
+                "new_lines": op.new_lines,
+                "occurrence": op.occurrence,
+                "must_be_unique": op.must_be_unique,
+                "context_before": op.context_before,
+                "context_after": op.context_after,
+            }
+            for op in ops
+        ]
         ops_summary = [
             {
                 "op": op.op,
@@ -1534,6 +1955,14 @@ class UnifiedOptimizerAgent:
             for op in ops
         ]
         patch = StructuredPatch(ops=ops, rationale=args.get("rationale", ""))
+        detail_file = self._write_detail_file(
+            f"checkpoint_{args['label']}.json",
+            {
+                "label": args["label"],
+                "rationale": args.get("rationale", ""),
+                "ops": full_ops,
+            },
+        )
         candidate_dir, errors = self.sandbox.checkpoint_candidate(args["label"], patch)
         if errors:
             print(f"  [Checkpoint] FAILED: {[_err_dict(e) for e in errors]}")
@@ -1557,7 +1986,7 @@ class UnifiedOptimizerAgent:
                                 )
                                 break
                 enriched.append(d)
-            self._history.append(
+            self._push_history(
                 {
                     "action": "checkpoint_candidate",
                     "step": self._step_count,
@@ -1565,6 +1994,7 @@ class UnifiedOptimizerAgent:
                     "ok": False,
                     "rationale": args.get("rationale", "")[:300],
                     "ops": ops_summary,
+                    "detail_file": detail_file,
                     "errors": enriched,
                 }
             )
@@ -1574,9 +2004,10 @@ class UnifiedOptimizerAgent:
             "label": args["label"],
             "rationale": args.get("rationale", "")[:500],
             "ops": ops_summary,
+            "detail_file": detail_file,
             "step": self._step_count,
         }
-        self._history.append(
+        self._push_history(
             {
                 "action": "checkpoint_candidate",
                 "step": self._step_count,
@@ -1584,6 +2015,7 @@ class UnifiedOptimizerAgent:
                 "ok": True,
                 "rationale": args.get("rationale", "")[:300],
                 "ops": ops_summary,
+                "detail_file": detail_file,
             }
         )
         return {"ok": True, "label": args["label"], "candidate_dir": candidate_dir}
@@ -1663,7 +2095,7 @@ class UnifiedOptimizerAgent:
         eval_error = result.get("error")
         if not eval_error and subprocess_errors:
             eval_error = f"subprocess_crash: {subprocess_errors[0][:1000]}"
-        self._history.append(
+        self._push_history(
             {
                 "action": "eval_candidate",
                 "step": self._step_count,
@@ -1678,28 +2110,121 @@ class UnifiedOptimizerAgent:
                 "error": eval_error,
             }
         )
-        # 在返回值中加入明确的 next_action 提示，引导 LLM 调 accept 或继续
-        result["candidate_label"] = label
-        result["candidate_score"] = normalized_score
-        result["baseline_score"] = train_baseline
-        result["test_set_baseline"] = self._baseline_score
+        # 完整 details + subprocess_errors 写入 detail 文件
+        detail_payload = {}
+        details = result.get("details", [])
+        if details:
+            detail_payload["details"] = details
+        if subprocess_errors:
+            detail_payload["subprocess_errors"] = subprocess_errors
+        detail_file = None
+        if detail_payload:
+            detail_file = self._write_detail_file(f"eval_{label}.json", detail_payload)
+
+        # L2: 提取 mini-L1 信息写独立文件
+        mini_l1_file = None
+        if self.layer_context and self.layer_context.level >= 2 and details:
+            mini_l1_data = []
+            for d in details:
+                if d.get("mini_l1_history"):
+                    mini_l1_data.append(
+                        {
+                            "question": d.get("question"),
+                            "raw_score": d.get("raw_score"),
+                            "accepted": d.get("accepted"),
+                            "steps": d.get("steps"),
+                            "score_trajectory": d.get("score_trajectory", []),
+                            "history": d["mini_l1_history"],
+                        }
+                    )
+            if mini_l1_data:
+                mini_l1_file = self._write_detail_file(
+                    f"mini_l1_{label}.json", mini_l1_data
+                )
+
+        # 精简返回值
         if normalized_score > train_baseline:
-            result["next_action"] = (
+            next_action = (
                 f"Score {normalized_score:.2f} > train_baseline {train_baseline:.2f}. "
                 f"Call accept_candidate(label='{label}') to add to top-K pool."
             )
         else:
-            result["next_action"] = (
+            next_action = (
                 f"Score {normalized_score:.2f} <= train_baseline {train_baseline:.2f}. "
                 f"Analyze why and try a different patch."
             )
-        return result
+        slim_result = {
+            "candidate_label": label,
+            "candidate_score": normalized_score,
+            "baseline_score": train_baseline,
+            "next_action": next_action,
+            "error": eval_error,
+        }
+        if subprocess_errors:
+            slim_result["subprocess_error_count"] = len(subprocess_errors)
+            slim_result["subprocess_error_preview"] = subprocess_errors[0][:200]
+        if detail_file:
+            slim_result["detail_file"] = detail_file
+        if mini_l1_file:
+            slim_result["mini_l1_detail_file"] = mini_l1_file
+        return slim_result
 
     def _tool_accept_candidate(self, args: dict) -> dict:
         """接受候选 — 加入 top-K 池，不直接 commit（final eval 时再 commit 最优的）。"""
         label = args["label"]
+        skip_eval = bool(args.get("skip_eval", False))
+        skip_reason = args.get("skip_eval_reason", "")
+
+        # skip_eval 模式: 确定性修复，跳过 eval 直接加入 top-K
+        if skip_eval:
+            if not skip_reason:
+                return {
+                    "ok": False,
+                    "error": "skip_eval=true requires skip_eval_reason explaining why eval is unnecessary.",
+                }
+            # 检查 candidate 是否存在（必须先 checkpoint）
+            candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+            if not os.path.isdir(candidate_dir):
+                return {
+                    "ok": False,
+                    "error": f"Candidate not found: {label}. Call checkpoint_candidate first.",
+                }
+            # 用 baseline 作为虚拟分数（final test eval 会重新测量真实分数）
+            train_baseline = (
+                self._current_train_baseline
+                if self.layer_context.level <= 1 and self._current_train_baseline > 0
+                else self._baseline_score
+            )
+            virtual_score = train_baseline + 0.01
+            self._candidate_scores[label] = virtual_score
+            self._update_top_candidates(label, virtual_score)
+            candidate_meta = self._candidate_meta.get(label, {})
+            print(
+                f"\n[AcceptCandidate] label={label} SKIP_EVAL (deterministic fix) "
+                f"reason={skip_reason[:100]}"
+            )
+            self._push_history(
+                {
+                    "action": "accept_candidate",
+                    "label": label,
+                    "step": self._step_count,
+                    "rationale": candidate_meta.get("rationale", ""),
+                    "ops": candidate_meta.get("ops", []),
+                    "score": virtual_score,
+                    "skip_eval": True,
+                    "skip_eval_reason": skip_reason,
+                }
+            )
+            top_labels = [c["label"] for c in self._top_candidates]
+            return {
+                "ok": True,
+                "label": label,
+                "skip_eval": True,
+                "top_candidates": top_labels,
+            }
+
+        # 正常模式: 需要先 eval_candidate
         cand_score = self._candidate_scores.get(label, 0)
-        # L1: 用当轮 train baseline；L2+: 用 test_set baseline
         train_baseline = (
             self._current_train_baseline
             if self.layer_context.level <= 1 and self._current_train_baseline > 0
@@ -1712,7 +2237,6 @@ class UnifiedOptimizerAgent:
             f"\n[AcceptCandidate] label={label} candidate_score={cand_score:.2f} "
             f"train_baseline={train_baseline:.2f} best_train={best_train_score:.2f}"
         )
-        # 检查是否已在 top-K 中
         in_top = any(c["label"] == label for c in self._top_candidates)
         if not in_top and cand_score <= train_baseline:
             print(
@@ -1720,7 +2244,7 @@ class UnifiedOptimizerAgent:
             )
             self.budget.no_improve_count += 1
             candidate_meta = self._candidate_meta.get(label, {})
-            self._history.append(
+            self._push_history(
                 {
                     "action": "reject_candidate",
                     "step": self._step_count,
@@ -1734,14 +2258,13 @@ class UnifiedOptimizerAgent:
                 "ok": False,
                 "error": f"Candidate score {cand_score:.2f} not better than train_baseline {train_baseline:.2f}. Not added to top-{self.top_k} pool.",
             }
-        # 加入 top-K 池（已在 eval_candidate 时更新过，这里确认）
         self._update_top_candidates(label, cand_score)
         self.budget.no_improve_count = 0
         if cand_score > self._best_score:
             self._best_score = cand_score
         self._current_score = cand_score
         candidate_meta = self._candidate_meta.get(label, {})
-        self._history.append(
+        self._push_history(
             {
                 "action": "accept_candidate",
                 "label": label,
@@ -1859,6 +2382,32 @@ class UnifiedOptimizerAgent:
                 if inter.get("history"):
                     detail["accepted"] = inter.get("accepted", 0)
                     detail["steps"] = inter.get("steps", 0)
+                    # mini-L1 history: 精简版，只保留关键字段
+                    raw_history = inter.get("history", [])
+                    detail["mini_l1_history"] = [
+                        {
+                            k: h[k]
+                            for k in (
+                                "action",
+                                "step",
+                                "label",
+                                "after_score",
+                                "before_score",
+                                "score",
+                                "accepted",
+                                "error",
+                                "rationale",
+                            )
+                            if k in h
+                        }
+                        for h in raw_history
+                    ]
+                    detail["score_trajectory"] = [
+                        round(h.get("after_score", h.get("score", 0)), 2)
+                        for h in raw_history
+                        if h.get("action")
+                        in ("eval_candidate", "accept_candidate", "reject_candidate")
+                    ]
                 details.append(detail)
             avg = sum(scores) / len(scores) if scores else 0.0
             out = {"score": avg, "details": details}
@@ -1921,7 +2470,7 @@ class UnifiedOptimizerAgent:
                     n_samples=l2_cfg.get("n_samples", 2),
                     model=self.model,
                     score_fn=child_score_fn,
-                    max_llm_calls=l2_cfg.get("max_llm_calls", 60),
+                    max_llm_calls=l2_cfg.get("max_llm_calls", 999999),
                     max_evals=l2_cfg.get("max_evals", 8),
                     max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 4),
                     layer_context=child_layer_context,
@@ -1938,7 +2487,7 @@ class UnifiedOptimizerAgent:
         child_spawn_restart = bool(child_result.get("spawn_restart"))
         noa_modified = child_accepted > 0 or child_spawn_restart
 
-        self._history.append(
+        self._push_history(
             {
                 "action": "spawn_sublayer",
                 "step": self._step_count,
@@ -2009,7 +2558,31 @@ class UnifiedOptimizerAgent:
 
     def _tool_get_history(self, args: dict) -> str:
         n = int(args.get("last_n", 10))
-        return json.dumps(self._history[-n:], indent=1, default=str)
+        _SLIM_KEYS = (
+            "action",
+            "step",
+            "label",
+            "score",
+            "after_score",
+            "before_score",
+            "accepted",
+            "error",
+            "episode_id",
+            "rationale",
+        )
+        slim = [{k: h[k] for k in _SLIM_KEYS if k in h} for h in self._history[-n:]]
+        # 完整历史写 detail 文件
+        detail_file = self._write_detail_file("full_history.json", self._history)
+        return json.dumps(
+            {
+                "recent": slim,
+                "total_count": len(self._history),
+                "detail_file": detail_file,
+                "hint": f"read_source_file(path='{detail_file}') for full history",
+            },
+            indent=1,
+            default=str,
+        )
 
 
 # --- Helpers ---
