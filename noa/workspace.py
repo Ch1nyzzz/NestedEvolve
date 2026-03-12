@@ -6,6 +6,8 @@ import os
 import shutil
 from datetime import datetime
 
+from noa.runtime import install_run_context
+
 
 class WorkspaceManager:
     """管理 .noa_runs/<run_id>/ 下的 workspace 和 snapshots。
@@ -22,9 +24,13 @@ class WorkspaceManager:
         self._run_dir = os.path.join(self.project_root, ".noa_runs", self._run_id)
         self._workspace_dir = os.path.join(self._run_dir, "workspace")
         self._snapshots_dir = os.path.join(self._run_dir, "snapshots")
+        self._logs_dir = os.path.join(self._run_dir, "logs")
+        self._state_dir = os.path.join(self._run_dir, "state")
 
         os.makedirs(self._workspace_dir, exist_ok=True)
         os.makedirs(self._snapshots_dir, exist_ok=True)
+        os.makedirs(self._logs_dir, exist_ok=True)
+        os.makedirs(self._state_dir, exist_ok=True)
 
     def setup(self) -> tuple[str, str]:
         """复制原始代码到 workspace，拍 init 快照，返回 (ws_noa_dir, ws_source_dir)。"""
@@ -65,6 +71,7 @@ class WorkspaceManager:
             shutil.copytree(utils_dir, ws_utils)
 
         self.snapshot("init")
+        install_run_context(self._run_id, self._run_dir)
         return ws_noa, ws_source
 
     def snapshot(self, label: str) -> str:

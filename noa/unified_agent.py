@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+from copy import deepcopy
 from typing import Callable
 
 from noa.core.protocol import (
@@ -16,12 +18,20 @@ from noa.core.protocol import (
 )
 from noa.patch_protocol import apply_patch_ops, validate_patch_ops
 from noa.core.protocol import OptimizationBudget
+from noa.runtime import bind_scope
 from noa.sandbox_manager import SandboxManager
 from noa.stages.agentic import agentic_loop
 from noa.stages.initiator import collect_sources
 from noa.tools.probe import ComponentProbe
 from noa.trajectory_store import TrajectoryStore
 from noa.unified_prompts import UNIFIED_AGENT_INITIAL, UNIFIED_AGENT_SYSTEM
+
+# 默认总墙钟预算 (秒): 8 小时
+DEFAULT_WALL_BUDGET_SEC = 28800
+# 子操作预留余量 (秒): 给上层处理结果留时间
+_DEADLINE_MARGIN_SEC = 120
+# 拒绝启动 eval 的最低剩余时间 (秒)
+_MIN_REMAINING_FOR_EVAL_SEC = 300
 
 log = logging.getLogger(__name__)
 # 确保 log 输出到 stdout
@@ -61,6 +71,8 @@ class UnifiedOptimizerAgent:
         train_sample_size: int = 25,
         n_samples: int = 30,
         top_k: int = 3,
+        initial_baseline_score: float | None = None,
+        wall_budget_sec: float = DEFAULT_WALL_BUDGET_SEC,
     ):
         self.sys_desc = sys_desc
         self.source_dir = source_dir
@@ -85,6 +97,11 @@ class UnifiedOptimizerAgent:
         self.train_sample_size = train_sample_size
         self.n_samples = n_samples
         self.top_k = top_k
+        self._initial_baseline_score = initial_baseline_score
+
+        # 统一 deadline: 绝对单调时间 (monotonic)
+        self._wall_budget_sec = wall_budget_sec
+        self._deadline = time.monotonic() + wall_budget_sec
 
         self.prefix = "target" if layer_context.level <= 1 else "optimizer"
         self._file_map: dict[str, str] = {}
@@ -105,8 +122,13 @@ class UnifiedOptimizerAgent:
         self._in_escape_mode = False
         self._escape_resolved = False
         self._candidate_meta: dict[str, dict] = {}
+        self._final_eval_result: dict | None = None
+        self._final_eval_trigger: str | None = None
+        self._spawn_ready_baseline_score: float | None = None
         # 当轮训练样本 (每次 observe 时从 train_pool 随机抽取)
         self._current_train_samples: list = []
+        # 当轮 train 样本上的 baseline 分数 (每次 observe 时重新计算)
+        self._current_train_baseline: float = 0.0
         # Top-K 候选池
         self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}]
 
@@ -125,6 +147,11 @@ class UnifiedOptimizerAgent:
 
     def _compute_baseline(self):
         """用 test_set 跑一次 baseline 分数。"""
+        if self._initial_baseline_score is not None:
+            self._baseline_score = float(self._initial_baseline_score)
+            self._current_score = self._baseline_score
+            print(f"[Baseline] using precomputed score={self._baseline_score:.2f}")
+            return
         try:
             result = self.eval_fn(self.target, self.test_set)
             score = result["score"]
@@ -138,10 +165,70 @@ class UnifiedOptimizerAgent:
             self._baseline_score = 0.0
             self._current_score = 0.0
 
-    def _final_eval_top_candidates(self) -> dict | None:
-        """用 test_set 对 top-K 候选做 full eval，commit 最优的那个。"""
+    def _final_eval_top_candidates(self, trigger: str = "finish") -> dict | None:
+        """用 test_set 对 top-K 候选做 full eval，commit 最优的那个。
+        L2+ 层: mini-L1 的 eval_candidate 已在 test_set 上做过 final eval，
+        跳过冗余 FinalEval，直接用已有分数 commit 最优候选。
+        """
         if not self._top_candidates:
+            self._history.append(
+                {
+                    "action": "final_eval_skipped",
+                    "step": self._step_count,
+                    "trigger": trigger,
+                    "reason": "no_top_candidates",
+                    "baseline_score": round(self._baseline_score, 2),
+                }
+            )
             return None
+
+        # L2+ 层: eval_candidate 返回的分数已经是 mini-L1 的 test_set final eval，
+        # 再跑一次 FinalEval 只会引入随机噪声。直接用已有分数 commit 最优。
+        if self.layer_context and self.layer_context.level >= 2:
+            best_cand = max(self._top_candidates, key=lambda c: c["score"])
+            best_label = best_cand["label"]
+            best_score = best_cand["score"]
+            if best_score > self._baseline_score:
+                print(
+                    f"\n[FinalEval] L2+ skip re-eval: committing {best_label} "
+                    f"(eval_score={best_score:.2f}, baseline={self._baseline_score:.2f})"
+                )
+                self.sandbox.accept_candidate(best_label)
+                self.sys_desc.source_files = collect_sources(self.source_dir)
+                self._refresh_file_map()
+                self.target = self.target_factory(self.source_dir)
+                self._best_score = best_score
+                self._current_score = best_score
+                self._accepted_patches += 1
+                self._history.append(
+                    {
+                        "action": "final_eval_commit",
+                        "step": self._step_count,
+                        "trigger": trigger,
+                        "label": best_label,
+                        "test_score": round(best_score, 2),
+                        "baseline_score": round(self._baseline_score, 2),
+                        "l2_skip_reeval": True,
+                    }
+                )
+                return {"label": best_label, "test_score": best_score}
+            else:
+                print(
+                    f"\n[FinalEval] L2+ skip re-eval: no candidate beats baseline "
+                    f"(best={best_score:.2f}, baseline={self._baseline_score:.2f})"
+                )
+                self._history.append(
+                    {
+                        "action": "final_eval_no_commit",
+                        "step": self._step_count,
+                        "trigger": trigger,
+                        "baseline_score": round(self._baseline_score, 2),
+                        "top_candidate_count": len(self._top_candidates),
+                        "l2_skip_reeval": True,
+                    }
+                )
+                return None
+
         print(
             f"\n[FinalEval] Evaluating top-{len(self._top_candidates)} candidates on test_set ({len(self.test_set)} samples)..."
         )
@@ -182,6 +269,8 @@ class UnifiedOptimizerAgent:
             self._history.append(
                 {
                     "action": "final_eval_commit",
+                    "step": self._step_count,
+                    "trigger": trigger,
                     "label": best_label,
                     "test_score": round(best_score, 2),
                     "baseline_score": round(self._baseline_score, 2),
@@ -192,7 +281,194 @@ class UnifiedOptimizerAgent:
             print(
                 f"  [FinalEval] No candidate beats baseline ({self._baseline_score:.2f})"
             )
+            self._history.append(
+                {
+                    "action": "final_eval_no_commit",
+                    "step": self._step_count,
+                    "trigger": trigger,
+                    "baseline_score": round(self._baseline_score, 2),
+                    "top_candidate_count": len(self._top_candidates),
+                }
+            )
             return None
+
+    def _run_final_eval_once(self, trigger: str) -> dict | None:
+        """只执行一次 held-out final eval，供 pre-spawn 和 finish 共享。"""
+        if self._final_eval_trigger is not None:
+            return self._final_eval_result
+        self._final_eval_trigger = trigger
+        self._final_eval_result = self._final_eval_top_candidates(trigger=trigger)
+        return self._final_eval_result
+
+    def _prepare_spawn_baseline(self) -> float:
+        """spawn 前先固化一次 test-set 结果，供 L2 直接复用。"""
+        if self._spawn_ready_baseline_score is not None:
+            return self._spawn_ready_baseline_score
+
+        print("\n[SpawnPrep] Running pre-spawn test-set final eval...")
+        final_eval = self._run_final_eval_once(trigger="pre_spawn")
+        if final_eval and final_eval.get("test_score") is not None:
+            self._spawn_ready_baseline_score = float(final_eval["test_score"])
+        else:
+            self._spawn_ready_baseline_score = self._baseline_score
+        print(f"[SpawnPrep] L2 baseline seed={self._spawn_ready_baseline_score:.2f}")
+        return self._spawn_ready_baseline_score
+
+    def _write_parent_context_artifact(
+        self, parent_summary: str, baseline_score: float
+    ) -> str | None:
+        """将完整父层上下文写入只读 JSON，供 L2 按需读取。"""
+        if not self.source_dir:
+            return None
+        meta_dir = os.path.join(self.source_dir, ".noa_meta")
+        os.makedirs(meta_dir, exist_ok=True)
+        artifact_path = os.path.join(meta_dir, "l1_parent_context.json")
+        payload = {
+            "parent_summary": parent_summary,
+            "baseline_score": baseline_score,
+            "current_score": self._current_score,
+            "accepted_patches": self._accepted_patches,
+            "step_count": self._step_count,
+            "top_candidates": deepcopy(self._top_candidates),
+            "final_eval": deepcopy(self._final_eval_result),
+            "history": deepcopy(self._history),
+        }
+        with open(artifact_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+        rel_path = os.path.relpath(artifact_path, self.source_dir)
+        return f"@readonly/{rel_path}"
+
+    def _run_mini_l1_subprocess(
+        self,
+        *,
+        noa_source_dir: str,
+        project_root: str,
+        dataset_pickle_path: str,
+        train_pool_pickle_path: str | None,
+        test_set_pickle_path: str | None,
+        question: str,
+        ml1_cfg: dict,
+        train_sample_size: int,
+        top_k: int,
+    ) -> dict:
+        """运行 mini-L1 subprocess，对瞬时失败做有限重试。"""
+        from noa.subprocess_runner import run_layer_subprocess
+
+        retries = int(ml1_cfg.get("subprocess_retries", 1))
+        timeout = self._nested_mini_l1_timeout(ml1_cfg)
+        transient_types = {"timeout", "llm_connection_error", "unknown"}
+        last_result: dict | None = None
+
+        for attempt in range(retries + 1):
+            run_seed = hash((question, attempt)) & 0x7FFFFFFF
+            result = run_layer_subprocess(
+                noa_dir=noa_source_dir,
+                project_root=project_root,
+                target_source_dir=self.source_dir,
+                dataset_pickle_path=dataset_pickle_path,
+                layer_level=1,
+                max_steps=ml1_cfg.get("max_steps", 8),
+                n_samples=ml1_cfg.get("n_samples", 10),
+                max_llm_calls=ml1_cfg.get("max_llm_calls", 40),
+                max_evals=ml1_cfg.get("max_evals", 4),
+                max_no_improve_steps=ml1_cfg.get("max_no_improve_steps", 3),
+                model=self.model,
+                isolate_source=True,
+                random_seed=run_seed,
+                train_pool_pickle_path=train_pool_pickle_path,
+                test_set_pickle_path=test_set_pickle_path,
+                train_sample_size=train_sample_size,
+                top_k=top_k,
+                timeout=timeout,
+                attempt_index=attempt,
+            )
+            if not result.get("error"):
+                if attempt > 0:
+                    result["subprocess_retry_count"] = attempt
+                return result
+            last_result = result
+            error_type = result.get("error_type", "unknown")
+            if attempt >= retries or error_type not in transient_types:
+                break
+            print(
+                f"[Spawn] mini-L1 subprocess retry {attempt + 1}/{retries} after {error_type}"
+            )
+
+        if last_result is None:
+            last_result = {
+                "final_score": 0,
+                "error": "mini-L1 subprocess failed without result",
+                "error_type": "unknown",
+            }
+        last_result["subprocess_retry_count"] = retries
+        return last_result
+
+    def _remaining_sec(self) -> float:
+        """返回距离 deadline 的剩余秒数 (可能为负)。"""
+        return self._deadline - time.monotonic()
+
+    def _nested_mini_l1_timeout(self, ml1_cfg: dict | None = None) -> int:
+        """为嵌套 mini-L1 评估选择超时，基于剩余预算动态计算。
+
+        优先级: 剩余预算 - margin > 配置显式值 > 层级默认值。
+        确保 mini_l1_timeout <= 剩余预算 - margin。
+        """
+        cfg = ml1_cfg if ml1_cfg is not None else self.spawn_config.get("mini_l1", {})
+
+        # 基于剩余时间计算上限
+        remaining = self._remaining_sec()
+        budget_limit = max(0, int(remaining - _DEADLINE_MARGIN_SEC))
+
+        # 配置显式值
+        raw = cfg.get("timeout")
+        if raw is not None:
+            configured = int(raw)
+        elif self.layer_context and self.layer_context.level >= 2:
+            configured = 14400  # 4h default for L2
+        else:
+            configured = 14400  # 4h default for L1
+
+        # 取两者中较小的
+        timeout = min(configured, budget_limit)
+        if timeout < _MIN_REMAINING_FOR_EVAL_SEC:
+            log.warning(
+                "[timeout] mini_l1 timeout=%ds < minimum %ds, remaining=%.0fs",
+                timeout,
+                _MIN_REMAINING_FOR_EVAL_SEC,
+                remaining,
+            )
+        return max(timeout, 0)
+
+    def _nested_eval_timeout(self) -> float | None:
+        """候选评估超时，从剩余预算动态计算。
+
+        L1: 基于剩余预算 (不再返回 None)
+        L2+: mini_l1_timeout + 60s margin, 但不超过剩余预算
+        """
+        remaining = self._remaining_sec()
+        budget_limit = max(0, remaining - _DEADLINE_MARGIN_SEC)
+
+        if not self.layer_context or self.layer_context.level < 2:
+            # L1: sandbox eval 用 run_forked, 给它剩余预算
+            return budget_limit if budget_limit > 0 else 600.0
+
+        # L2+: 外层 sandbox 需要比内层 mini-L1 更长
+        inner = self._nested_mini_l1_timeout()
+        desired = float(inner + 60)
+        return min(desired, budget_limit)
+
+    def _check_time_for_eval(self, operation: str = "eval") -> str | None:
+        """检查是否有足够时间启动评估。不够则返回错误消息。"""
+        remaining = self._remaining_sec()
+        if remaining < _MIN_REMAINING_FOR_EVAL_SEC:
+            msg = (
+                f"Insufficient time for {operation}: "
+                f"{remaining:.0f}s remaining < {_MIN_REMAINING_FOR_EVAL_SEC}s minimum. "
+                f"Call finish to end the optimization loop."
+            )
+            log.warning("[deadline] %s", msg)
+            return msg
+        return None
 
     def run(self) -> dict:
         """运行 unified agent 循环。"""
@@ -224,16 +500,20 @@ class UnifiedOptimizerAgent:
         ]
         tools = self._build_tool_schemas()
 
+        # 墙钟超时：从统一 deadline 计算，留 margin 给 final eval
+        wall_timeout = max(0, self._remaining_sec() - _DEADLINE_MARGIN_SEC)
+
         loop_stats: dict = {}
         agentic_loop(
             messages=messages,
             tools=tools,
             tool_executor=self._dispatch_tool,
             model=self.model,
-            max_tool_calls=self.budget.max_steps * 4,
+            max_tool_calls=self.budget.max_steps * 20,
             max_tokens=16384,
             early_stop_fn=self._should_stop,
             stats=loop_stats,
+            wall_timeout_sec=wall_timeout,
             no_tool_call_prompt=(
                 "You must continue the optimization loop by calling tools. "
                 "After analyze, you should: (1) checkpoint_candidate with the patch ops, "
@@ -244,6 +524,22 @@ class UnifiedOptimizerAgent:
         )
         self.budget.llm_calls_used += loop_stats.get("llm_calls", 0)
 
+        # Loop 结束后，若未 spawn 且有权 spawn，自动触发 L2
+        if (
+            self.layer_context
+            and self.layer_context.can_spawn_sublayer()
+            and self.budget.spawn_calls_used == 0
+        ):
+            log.info(
+                "[unified_agent] agentic_loop 结束但未 spawn，自动触发 spawn_sublayer"
+            )
+            result = self._tool_spawn_sublayer({})
+            if result.get("ok"):
+                self.budget.spawn_calls_used += 1
+                self.layer_context.spawn_calls_used += 1
+                if result.get("child_accepted", 0) > 0 or result.get("noa_modified"):
+                    self._spawn_noa_modified = True
+
         return self._build_result()
 
     def _should_stop(self) -> bool:
@@ -251,6 +547,13 @@ class UnifiedOptimizerAgent:
             return True
         if self._in_escape_mode:
             return self._escape_resolved
+        # deadline 检查: 剩余时间不够做任何有意义的操作时强制停止
+        if self._remaining_sec() < _MIN_REMAINING_FOR_EVAL_SEC:
+            log.warning(
+                "[should_stop] deadline approaching: %.0fs remaining, forcing stop",
+                self._remaining_sec(),
+            )
+            return True
         if not self.budget.reached_limit():
             return False
         # 预算耗尽 + 可spawn → 进入逃生模式（持续放行直到 spawn/finish）
@@ -259,14 +562,46 @@ class UnifiedOptimizerAgent:
             return False
         return True
 
+    def _auto_accept_unadded_candidates(self):
+        """自动将已 eval 且超过 train baseline 但未在 top-K 池中的候选加入池。
+        修复: 最后一步 eval 的候选因 agentic loop 结束而无法被 LLM 调用 accept_candidate。
+        """
+        top_labels = {c["label"] for c in self._top_candidates}
+        # L1: 用当轮 train baseline；L2+: 用 test_set baseline
+        train_bl = (
+            self._current_train_baseline
+            if self.layer_context.level <= 1 and self._current_train_baseline > 0
+            else self._baseline_score
+        )
+        for label, score in self._candidate_scores.items():
+            if label not in top_labels and score > train_bl:
+                log.info(
+                    "[auto_accept] %s score=%.2f > train_baseline=%.2f, adding to top-K",
+                    label,
+                    score,
+                    train_bl,
+                )
+                self._update_top_candidates(label, score)
+
     def _build_result(self) -> dict:
+        # 自动补救: 将已 eval 但未 accept 的优质候选加入 top-K 池
+        self._auto_accept_unadded_candidates()
         # Final eval: 用 test_set 对 top-K 候选做完整评估并 commit 最优
-        final_eval = self._final_eval_top_candidates()
+        final_eval = self._run_final_eval_once(trigger="finish")
         # final_score 只取 final eval 的 test_set 结果（如果有 commit），否则回退到 baseline
         if final_eval and final_eval.get("test_score") is not None:
             committed_score = final_eval["test_score"]
         else:
             committed_score = self._baseline_score
+
+        # L2 spawn 的 mini-L1 已含 test eval，直接复用 child_score
+        if self._spawn_noa_modified:
+            for h in reversed(self._history):
+                if h.get("action") == "spawn_sublayer":
+                    committed_score = h.get("child_score", committed_score)
+                    log.info("[build_result] 复用 L2 child_score=%.2f", committed_score)
+                    break
+
         return {
             "final_score": committed_score,
             "baseline_score": self._baseline_score,
@@ -304,7 +639,9 @@ class UnifiedOptimizerAgent:
                         "delete",
                         "insert_after",
                         "insert_before",
+                        "overwrite",
                     ],
+                    "description": "update=SEARCH/REPLACE, overwrite=replace entire file with content, create=new file, delete=remove file",
                 },
                 "file_path": {
                     "type": "string",
@@ -388,15 +725,6 @@ class UnifiedOptimizerAgent:
         )
         tools.append(
             _tool(
-                f"{p}__run_smoke",
-                "Quick health check (3 samples).",
-                {
-                    "seed": {"type": "integer"},
-                },
-            )
-        )
-        tools.append(
-            _tool(
                 f"{p}__run_eval",
                 "Evaluate system on current train samples (NOT test set).",
                 {
@@ -444,21 +772,6 @@ class UnifiedOptimizerAgent:
         )
 
         # D. 编辑与验证
-        tools.append(
-            _tool(
-                f"{p}__apply_patch",
-                "Apply a structured patch (sandbox only, does NOT commit).",
-                {
-                    "ops": {
-                        "type": "array",
-                        "items": _PATCH_OP_SCHEMA,
-                        "description": "List of PatchOp dicts",
-                    },
-                    "rationale": {"type": "string"},
-                },
-                required=["ops", "rationale"],
-            )
-        )
         tools.append(
             _tool(
                 f"{p}__verify_search_block",
@@ -529,6 +842,25 @@ class UnifiedOptimizerAgent:
                     "seed": {"type": "integer"},
                 },
                 required=["label"],
+            )
+        )
+        tools.append(
+            _tool(
+                f"{p}__fix_patch",
+                "Fix a broken candidate: replace its patch ops with corrected ones, re-validate (including syntax check), and re-checkpoint. Use after eval_candidate returns score=0 with subprocess errors.",
+                {
+                    "label": {
+                        "type": "string",
+                        "description": "Candidate label to fix",
+                    },
+                    "ops": {
+                        "type": "array",
+                        "items": _PATCH_OP_SCHEMA,
+                        "description": "Corrected patch ops",
+                    },
+                    "rationale": {"type": "string"},
+                },
+                required=["label", "ops"],
             )
         )
         tools.append(
@@ -803,6 +1135,14 @@ class UnifiedOptimizerAgent:
     def _tool_run_observe(self, args: dict) -> dict:
         import random as _random
 
+        # L2+: 直接从 parent_history 合成 Trajectory，不跑 mini-L1
+        if (
+            self.layer_context
+            and self.layer_context.level >= 2
+            and self.layer_context.parent_history
+        ):
+            return self._observe_from_parent_history()
+
         from noa.stages.observer import observe_agentic
 
         # 每轮从 train_pool 随机抽取 train_sample_size 条 (seed 随 episode 递增)
@@ -832,6 +1172,20 @@ class UnifiedOptimizerAgent:
             ),
         )
         self._trajectories = trajectories or []
+        # 计算当轮 train 样本上的 baseline 分数（未修改的原始 pipeline）
+        try:
+            base_result = self.eval_fn(self.target, self._current_train_samples)
+            base_score = base_result.get("score", 0)
+            self._current_train_baseline = (
+                base_score * 100 if base_score <= 1 else base_score
+            )
+            print(
+                f"\n[Observe] train_baseline={self._current_train_baseline:.2f} "
+                f"(on {len(self._current_train_samples)} train samples)"
+            )
+        except Exception as e:
+            log.warning(f"[Observe] failed to compute train baseline: {e}")
+            self._current_train_baseline = 0.0
         # 保存到 trajectory store
         self._episode_counter += 1
         ep_id = f"ep_{self._episode_counter}"
@@ -867,6 +1221,61 @@ class UnifiedOptimizerAgent:
             }
         )
         return {"episode_id": ep_id, "count": 0, "mean_score": 0}
+
+    def _observe_from_parent_history(self) -> dict:
+        """L2+: 不做精简，返回摘要统计 + 指引 LLM 用 read_source_file 读完整历史。"""
+        history = self.layer_context.parent_history
+
+        # 统计摘要
+        n_evals = sum(1 for h in history if h.get("action") == "eval_candidate")
+        n_accepted = sum(
+            1
+            for h in history
+            if h.get("action") == "eval_candidate" and h.get("accepted")
+        )
+        n_analyzes = sum(1 for h in history if h.get("action") == "analyze")
+
+        # 找到完整历史文件路径
+        context_file = None
+        for path in self.layer_context.parent_context_files:
+            if "l1_parent_context" in path:
+                context_file = path
+                break
+
+        self._trajectories = []
+        self._episode_counter += 1
+        ep_id = f"ep_{self._episode_counter}"
+
+        print(
+            f"\n[Observe-L2] parent_history: {len(history)} records "
+            f"(evals={n_evals}, accepted={n_accepted}, analyzes={n_analyzes})"
+        )
+        self._history.append(
+            {
+                "action": "observe",
+                "step": self._step_count,
+                "episode_id": ep_id,
+                "n_records": len(history),
+                "n_evals": n_evals,
+                "n_accepted": n_accepted,
+                "source": "parent_history",
+            }
+        )
+        result = {
+            "episode_id": ep_id,
+            "source": "parent_history",
+            "n_records": len(history),
+            "n_evals": n_evals,
+            "n_accepted": n_accepted,
+            "n_analyzes": n_analyzes,
+        }
+        if context_file:
+            result["full_history_file"] = context_file
+            result["hint"] = (
+                f"Use read_source_file(path='{context_file}') to inspect "
+                f"the complete untruncated L1 optimization history."
+            )
+        return result
 
     def _tool_run_smoke(self, args: dict) -> dict:
         import random
@@ -964,7 +1373,23 @@ class UnifiedOptimizerAgent:
             {
                 "action": "analyze",
                 "step": self._step_count,
-                "patterns": [str(p)[:150] for p in diagnosis.failure_patterns[:top_n]],
+                "patterns": [
+                    {
+                        "pattern": p.get("pattern", "")
+                        if isinstance(p, dict)
+                        else str(p)[:150],
+                        "root_cause": (
+                            p.get("root_cause", "") if isinstance(p, dict) else ""
+                        ),
+                        "affected_file": (
+                            p.get("affected_file", "") if isinstance(p, dict) else ""
+                        ),
+                        "severity": (
+                            p.get("severity", "") if isinstance(p, dict) else ""
+                        ),
+                    }
+                    for p in diagnosis.failure_patterns[:top_n]
+                ],
             }
         )
         return {
@@ -975,74 +1400,6 @@ class UnifiedOptimizerAgent:
 
     def _tool_compare_episodes(self, args: dict) -> dict:
         return self.traj_store.compare_episodes(args["ep_a"], args["ep_b"])
-
-    def _tool_apply_patch(self, args: dict) -> dict:
-        ops = _parse_ops(args.get("ops", []))
-        # 写保护：拒绝对只读文件的修改
-        for op in ops:
-            if op.file_path.startswith("@readonly/"):
-                return {
-                    "ok": False,
-                    "errors": [
-                        {"message": f"Cannot modify read-only file: {op.file_path}"}
-                    ],
-                }
-        print(
-            f"\n[ApplyPatch] ops={len(ops)} rationale={args.get('rationale', '')[:100]}"
-        )
-        for i, op in enumerate(ops):
-            search_preview = repr(op.search[:60]) if op.search else "''"
-            print(f"  op[{i}]: {op.op} file={op.file_path} search={search_preview}")
-        source_files = self.sys_desc.source_files
-        modified, errors, deleted_paths = apply_patch_ops(source_files, ops)
-        if errors:
-            print(f"  [ApplyPatch] FAILED: {[_err_dict(e) for e in errors]}")
-            return {"ok": False, "errors": [_err_dict(e) for e in errors]}
-        mod_map = {sf.path: sf for sf in modified}
-        existing_paths = {sf.path for sf in source_files}
-        # 过滤 delete，替换 update
-        new_list = [
-            mod_map.get(sf.path, sf)
-            for sf in source_files
-            if sf.path not in deleted_paths
-        ]
-        # 追加 create
-        new_files = [sf for path, sf in mod_map.items() if path not in existing_paths]
-        self.sys_desc.source_files = new_list + new_files
-        # 写入沙盒（修改和新建）
-        for sf in modified:
-            fpath = os.path.join(self.source_dir, sf.path)
-            os.makedirs(os.path.dirname(fpath), exist_ok=True)
-            with open(fpath, "w", encoding="utf-8") as f:
-                f.write(sf.content)
-        # 删除沙盒文件
-        for dp in deleted_paths:
-            fpath = os.path.join(self.source_dir, dp)
-            if os.path.exists(fpath):
-                os.remove(fpath)
-        self._refresh_file_map()
-        print(
-            f"  [ApplyPatch] OK modified={[sf.path for sf in modified]} deleted={list(deleted_paths)}"
-        )
-        self._history.append(
-            {
-                "action": "apply_patch",
-                "step": self._step_count,
-                "diffs": [
-                    {
-                        "file_path": op.file_path,
-                        "search": (op.search or "")[:100],
-                        "replace": (op.replace or "")[:100],
-                    }
-                    for op in ops
-                ],
-            }
-        )
-        return {
-            "ok": True,
-            "modified_files": [sf.path for sf in modified],
-            "deleted_files": list(deleted_paths),
-        }
 
     def _tool_verify_search_block(self, args: dict) -> dict:
         path = args.get("path", "")
@@ -1065,11 +1422,77 @@ class UnifiedOptimizerAgent:
         return result
 
     def _tool_dry_run_patch(self, args: dict) -> dict:
+        import ast as _ast
+
         ops = _parse_ops(args.get("ops", []))
         errors = validate_patch_ops(self.sys_desc.source_files, ops)
         if errors:
             return {"valid": False, "errors": [_err_dict(e) for e in errors]}
+        # 模拟 apply 后对 .py 文件做语法检查
+        patched, apply_errors, _ = apply_patch_ops(self.sys_desc.source_files, ops)
+        if apply_errors:
+            return {"valid": False, "errors": [_err_dict(e) for e in apply_errors]}
+        syntax_errors = []
+        for sf in patched:
+            if sf.path.endswith(".py"):
+                try:
+                    _ast.parse(sf.content, filename=sf.path)
+                except SyntaxError as e:
+                    syntax_errors.append(
+                        {
+                            "file": sf.path,
+                            "line": e.lineno,
+                            "message": str(e),
+                        }
+                    )
+        if syntax_errors:
+            return {"valid": False, "syntax_errors": syntax_errors}
         return {"valid": True, "op_count": len(ops)}
+
+    def _tool_fix_patch(self, args: dict) -> dict:
+        """修复已 checkpoint 的 candidate：用新 ops 替换原有 patch 并重新验证。"""
+        import ast as _ast
+
+        label = args.get("label", "")
+        new_ops = _parse_ops(args.get("ops", []))
+        if not label or not new_ops:
+            return {"ok": False, "error": "label and ops are required"}
+        # 验证 ops 能匹配原始文件
+        errors = validate_patch_ops(self.sys_desc.source_files, new_ops)
+        if errors:
+            return {"ok": False, "errors": [_err_dict(e) for e in errors]}
+        # 模拟 apply 后语法检查
+        patched, apply_errors, _ = apply_patch_ops(self.sys_desc.source_files, new_ops)
+        if apply_errors:
+            return {"ok": False, "errors": [_err_dict(e) for e in apply_errors]}
+        syntax_errors = []
+        for sf in patched:
+            if sf.path.endswith(".py"):
+                try:
+                    _ast.parse(sf.content, filename=sf.path)
+                except SyntaxError as e:
+                    syntax_errors.append(
+                        {
+                            "file": sf.path,
+                            "line": e.lineno,
+                            "message": str(e),
+                        }
+                    )
+        if syntax_errors:
+            return {"ok": False, "syntax_errors": syntax_errors}
+        # 重新 checkpoint（覆盖旧的）
+        patch = StructuredPatch(
+            ops=new_ops, rationale=args.get("rationale", f"fix for {label}")
+        )
+        candidate_dir, cp_errors = self.sandbox.checkpoint_candidate(label, patch)
+        if cp_errors:
+            return {"ok": False, "errors": [_err_dict(e) for e in cp_errors]}
+        # 更新 meta
+        self._candidate_meta[label] = {
+            "rationale": args.get("rationale", f"fix for {label}"),
+            "ops": [{"op": o.op, "file_path": o.file_path} for o in new_ops],
+        }
+        return {"ok": True, "label": label, "op_count": len(new_ops)}
 
     def _tool_snapshot(self, args: dict) -> dict:
         path = self.sandbox.snapshot(args["label"])
@@ -1183,6 +1606,10 @@ class UnifiedOptimizerAgent:
 
     def _tool_eval_candidate(self, args: dict) -> dict:
         label = args["label"]
+        # 时间检查: 拒绝启动必定超时的评估
+        time_err = self._check_time_for_eval("eval_candidate")
+        if time_err:
+            return {"error": time_err, "error_type": "insufficient_time"}
         candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
         if not os.path.isdir(candidate_dir):
             return {"error": f"Candidate not found: {label}"}
@@ -1195,6 +1622,7 @@ class UnifiedOptimizerAgent:
         )
         eval_n = len(val_data)
         eval_seed = 42
+        timeout_sec = self._nested_eval_timeout()
         self.budget.evals_used += 1
         result = self.sandbox.eval_in_sandbox(
             candidate_dir,
@@ -1203,15 +1631,21 @@ class UnifiedOptimizerAgent:
             val_data,
             eval_n,
             seed=eval_seed,
+            timeout_sec=timeout_sec,
         )
         score = result.get("score", result.get("mean_score", 0))
         # 归一化到 0~100，与 run_eval 保持一致
         normalized_score = score * 100 if score <= 1 else score
         self._candidate_scores[label] = normalized_score
         # 注意: 不在 eval 阶段加入 top_candidates，只在 accept_candidate 时加入
-        best_score = max(self._best_score, self._baseline_score)
+        # L1: 用当轮 train 样本的 baseline 比较；L2+: 用 test_set baseline（L2 不走 observe 抽样）
+        train_baseline = (
+            self._current_train_baseline
+            if self.layer_context.level <= 1 and self._current_train_baseline > 0
+            else self._baseline_score
+        )
         candidate_meta = self._candidate_meta.get(label, {})
-        accepted = normalized_score > best_score
+        accepted = normalized_score > train_baseline
         # 检测 subprocess 崩溃（L2 场景）
         subprocess_errors = result.get("subprocess_errors", [])
         if subprocess_errors:
@@ -1223,12 +1657,12 @@ class UnifiedOptimizerAgent:
                 print(f"  {err[:200]}")
         else:
             print(
-                f"\n[EvalCandidate] label={label} score={normalized_score:.2f} (baseline={self._baseline_score:.2f}, best={self._best_score:.2f}, current={self._current_score:.2f})"
+                f"\n[EvalCandidate] label={label} score={normalized_score:.2f} (train_baseline={train_baseline:.2f}, best={self._best_score:.2f}, current={self._current_score:.2f})"
             )
         # 合并 error 信息
         eval_error = result.get("error")
         if not eval_error and subprocess_errors:
-            eval_error = f"subprocess_crash: {subprocess_errors[0][:300]}"
+            eval_error = f"subprocess_crash: {subprocess_errors[0][:1000]}"
         self._history.append(
             {
                 "action": "eval_candidate",
@@ -1237,31 +1671,52 @@ class UnifiedOptimizerAgent:
                 "mode": mode,
                 "rationale": candidate_meta.get("rationale", ""),
                 "ops": candidate_meta.get("ops", []),
-                "before_score": round(best_score, 2),
+                "before_score": round(train_baseline, 2),
                 "after_score": round(normalized_score, 2),
                 "accepted": accepted,
                 "details_count": len(result.get("details", [])),
                 "error": eval_error,
             }
         )
+        # 在返回值中加入明确的 next_action 提示，引导 LLM 调 accept 或继续
+        result["candidate_label"] = label
+        result["candidate_score"] = normalized_score
+        result["baseline_score"] = train_baseline
+        result["test_set_baseline"] = self._baseline_score
+        if normalized_score > train_baseline:
+            result["next_action"] = (
+                f"Score {normalized_score:.2f} > train_baseline {train_baseline:.2f}. "
+                f"Call accept_candidate(label='{label}') to add to top-K pool."
+            )
+        else:
+            result["next_action"] = (
+                f"Score {normalized_score:.2f} <= train_baseline {train_baseline:.2f}. "
+                f"Analyze why and try a different patch."
+            )
         return result
 
     def _tool_accept_candidate(self, args: dict) -> dict:
         """接受候选 — 加入 top-K 池，不直接 commit（final eval 时再 commit 最优的）。"""
         label = args["label"]
         cand_score = self._candidate_scores.get(label, 0)
+        # L1: 用当轮 train baseline；L2+: 用 test_set baseline
+        train_baseline = (
+            self._current_train_baseline
+            if self.layer_context.level <= 1 and self._current_train_baseline > 0
+            else self._baseline_score
+        )
         best_train_score = max(
-            (c["score"] for c in self._top_candidates), default=self._baseline_score
+            (c["score"] for c in self._top_candidates), default=train_baseline
         )
         print(
             f"\n[AcceptCandidate] label={label} candidate_score={cand_score:.2f} "
-            f"baseline={self._baseline_score:.2f} best_train={best_train_score:.2f}"
+            f"train_baseline={train_baseline:.2f} best_train={best_train_score:.2f}"
         )
         # 检查是否已在 top-K 中
         in_top = any(c["label"] == label for c in self._top_candidates)
-        if not in_top and cand_score <= self._baseline_score:
+        if not in_top and cand_score <= train_baseline:
             print(
-                f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= baseline {self._baseline_score:.2f}"
+                f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= train_baseline {train_baseline:.2f}"
             )
             self.budget.no_improve_count += 1
             candidate_meta = self._candidate_meta.get(label, {})
@@ -1272,12 +1727,12 @@ class UnifiedOptimizerAgent:
                     "label": label,
                     "rationale": candidate_meta.get("rationale", ""),
                     "ops": candidate_meta.get("ops", []),
-                    "reason": f"score {cand_score:.2f} <= baseline {self._baseline_score:.2f}",
+                    "reason": f"score {cand_score:.2f} <= train_baseline {train_baseline:.2f}",
                 }
             )
             return {
                 "ok": False,
-                "error": f"Candidate score {cand_score:.2f} not better than baseline {self._baseline_score:.2f}. Not added to top-{self.top_k} pool.",
+                "error": f"Candidate score {cand_score:.2f} not better than train_baseline {train_baseline:.2f}. Not added to top-{self.top_k} pool.",
             }
         # 加入 top-K 池（已在 eval_candidate 时更新过，这里确认）
         self._update_top_candidates(label, cand_score)
@@ -1308,7 +1763,7 @@ class UnifiedOptimizerAgent:
         from types import SimpleNamespace
 
         from noa.engine import NOptimizer
-        from noa.subprocess_runner import run_layer_subprocess, serialize_dataset
+        from noa.subprocess_runner import serialize_dataset
 
         if not self.layer_context or not self.layer_context.can_spawn_sublayer():
             return {"ok": False, "error": "Cannot spawn: depth/budget limit reached"}
@@ -1317,10 +1772,19 @@ class UnifiedOptimizerAgent:
                 "ok": False,
                 "error": "Cannot spawn: noa_dir or project_root not set",
             }
+        # 时间检查: spawn 需要至少 10 分钟
+        remaining = self._remaining_sec()
+        if remaining < 600:
+            return {
+                "ok": False,
+                "error": f"Insufficient time for spawn: {remaining:.0f}s remaining < 600s minimum",
+            }
 
         child_level = self.layer_context.level + 1
         noa_dir = self.noa_dir
         project_root = self.project_root
+        spawn_baseline_score = self._prepare_spawn_baseline()
+        spawn_id = f"{self.layer_context.layer_id.lower()}_step_{self._step_count}"
 
         print(f"\n[Spawn] Starting L{child_level} meta-optimizer (noa_dir={noa_dir})")
 
@@ -1349,23 +1813,14 @@ class UnifiedOptimizerAgent:
 
         def child_target_factory(noa_source_dir):
             def target(question):
-                run_seed = hash(question) & 0x7FFFFFFF
-                result = run_layer_subprocess(
-                    noa_dir=noa_source_dir,
+                result = self._run_mini_l1_subprocess(
+                    noa_source_dir=noa_source_dir,
                     project_root=project_root,
-                    target_source_dir=self.source_dir,
                     dataset_pickle_path=dpp,
-                    layer_level=1,
-                    max_steps=ml1.get("max_steps", 8),
-                    n_samples=ml1.get("n_samples", 10),
-                    max_llm_calls=ml1.get("max_llm_calls", 40),
-                    max_evals=ml1.get("max_evals", 4),
-                    max_no_improve_steps=ml1.get("max_no_improve_steps", 3),
-                    model=self.model,
-                    isolate_source=True,
-                    random_seed=run_seed,
                     train_pool_pickle_path=train_pool_pp,
                     test_set_pickle_path=test_set_pp,
+                    question=question,
+                    ml1_cfg=ml1,
                     train_sample_size=_train_sample_size,
                     top_k=_top_k,
                 )
@@ -1416,21 +1871,21 @@ class UnifiedOptimizerAgent:
             SimpleNamespace(question="opt_run_1", answer="0"),
         ]
 
-        # parent history for L2 context
-        parent_history = [
-            {
-                "iteration": i + 1,
-                "accepted": True,
-                "label": h.get("label", ""),
-                "step": h.get("step", 0),
-            }
-            for i, h in enumerate(self._history)
-            if h.get("action") == "accept_candidate"
-        ]
+        # parent history for L2 context — 传完整历史，L2 直接分析无需 re-observe
+        parent_history = list(self._history)  # 全量 copy
+        parent_current_score = (
+            self._spawn_ready_baseline_score
+            if self._spawn_ready_baseline_score is not None
+            else self._current_score
+        )
         parent_summary = (
-            f"Initial: {self._baseline_score:.2f}, Current: {self._current_score:.2f}, "
-            f"Delta: {self._current_score - self._baseline_score:+.2f}, "
-            f"Accepted: {self._accepted_patches}"
+            f"Initial: {self._baseline_score:.2f}, Current: {parent_current_score:.2f}, "
+            f"Delta: {parent_current_score - self._baseline_score:+.2f}, "
+            f"Accepted: {self._accepted_patches}, Steps: {self._step_count}"
+        )
+        parent_context_artifact = self._write_parent_context_artifact(
+            parent_summary=parent_summary,
+            baseline_score=spawn_baseline_score,
         )
 
         child_layer_context = LayerContext(
@@ -1440,28 +1895,41 @@ class UnifiedOptimizerAgent:
             readable_roots=[noa_dir, self.source_dir],
             parent_history=parent_history,
             parent_summary=parent_summary,
+            parent_context_files=(
+                [parent_context_artifact] if parent_context_artifact else []
+            ),
             max_depth=self.layer_context.max_depth,
             max_spawn_calls=max(0, self.layer_context.max_spawn_calls - 1),
         )
 
         l2_cfg = self.spawn_config.get("l2", {})
+        # 传播 deadline: 子层预算 = 剩余时间 - margin
+        child_wall_budget = max(0, self._remaining_sec() - _DEADLINE_MARGIN_SEC)
+        log.info(
+            "[spawn] child wall_budget=%.0fs (parent remaining=%.0fs)",
+            child_wall_budget,
+            self._remaining_sec(),
+        )
         try:
-            child = NOptimizer(
-                source_dir=noa_dir,
-                target_factory=child_target_factory,
-                dataset=child_dataset,
-                eval_fn=child_eval_fn,
-                max_steps=l2_cfg.get("max_steps", 12),
-                n_samples=l2_cfg.get("n_samples", 2),
-                model=self.model,
-                score_fn=child_score_fn,
-                max_llm_calls=l2_cfg.get("max_llm_calls", 60),
-                max_evals=l2_cfg.get("max_evals", 8),
-                max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 4),
-                layer_context=child_layer_context,
-                observer_search_roots=[noa_dir],
-            )
-            child_result = child.run()
+            with bind_scope(layer_id=child_layer_context.layer_id, spawn_id=spawn_id):
+                child = NOptimizer(
+                    source_dir=noa_dir,
+                    target_factory=child_target_factory,
+                    dataset=child_dataset,
+                    eval_fn=child_eval_fn,
+                    max_steps=l2_cfg.get("max_steps", 12),
+                    n_samples=l2_cfg.get("n_samples", 2),
+                    model=self.model,
+                    score_fn=child_score_fn,
+                    max_llm_calls=l2_cfg.get("max_llm_calls", 60),
+                    max_evals=l2_cfg.get("max_evals", 8),
+                    max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 4),
+                    layer_context=child_layer_context,
+                    observer_search_roots=[noa_dir],
+                    initial_baseline_score=spawn_baseline_score,
+                    wall_budget_sec=child_wall_budget,
+                )
+                child_result = child.run()
         except Exception as e:
             log.error(f"[Spawn] L{child_level} crashed: {e}", exc_info=True)
             return {"ok": False, "error": f"L{child_level} crashed: {str(e)[:500]}"}

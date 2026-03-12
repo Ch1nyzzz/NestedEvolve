@@ -3,31 +3,28 @@
   "data": {
     "total_n": 500,
     "test_n": 50,
-    "train_sample_size": 25,
+    "train_sample_size": 10,
     "split": "train"
   },
   "optimizer": {
-    "max_steps": 30,
-    "n_samples": 30,
+    "max_steps": 10,
+    "n_samples": 10,
     "model": "together_ai/moonshotai/Kimi-K2.5",
-    "max_llm_calls": 150,
-    "max_evals": 20,
-    "max_no_improve_steps": 8
+    "max_evals": 8,
+    "max_no_improve_steps": 4
   },
   "spawn": {
     "l2": {
-      "max_steps": 10,
+      "max_steps": 5,
       "n_samples": 1,
-      "max_llm_calls": 80,
-      "max_evals": 10,
-      "max_no_improve_steps": 5
+      "max_evals": 5,
+      "max_no_improve_steps": 3
     },
     "mini_l1": {
-      "max_steps": 30,
-      "n_samples": 30,
-      "max_llm_calls": 150,
-      "max_evals": 20,
-      "max_no_improve_steps": 8
+      "max_steps": 10,
+      "n_samples": 10,
+      "max_evals": 8,
+      "max_no_improve_steps": 4
     }
   },
   "nesting": {

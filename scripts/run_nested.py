@@ -70,7 +70,7 @@ def main():
         source_dir=source_dir,
         target_factory=target_factory,
         dataset=train_pool,
-        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=15),
+        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=5),
         score_fn=f1_score,
         l1_max_steps=opt.get("max_steps", 20),
         l1_n_samples=opt.get("n_samples", 50),

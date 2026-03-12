@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
@@ -28,6 +29,17 @@ class SystemDescription:
             lang = "json" if sf.path.endswith(".json") else "python"
             parts.append(f"## File: {sf.path}\n```{lang}\n{sf.content}\n```")
         return "\n\n".join(parts)
+
+    def get_source_index(self) -> str:
+        """只返回文件索引（路径+行数+首行摘要），不含完整源码。供 L2 按需读取。"""
+        lines = []
+        for sf in self.source_files:
+            n_lines = sf.content.count("\n") + 1
+            # 提取文件开头的 docstring 或首个 class/def 作为摘要
+            first_lines = sf.content.strip().split("\n")[:3]
+            summary = " | ".join(ln.strip() for ln in first_lines if ln.strip())[:120]
+            lines.append(f"- {sf.path} ({n_lines} lines): {summary}")
+        return "\n".join(lines)
 
     def to_context_str(self) -> str:
         """序列化为 LLM 可读系统摘要（不含完整源码）。"""
@@ -80,7 +92,7 @@ class DeltaPatch:
 class PatchOp:
     """单个结构化 patch 操作。"""
 
-    op: str  # "update", "create", "delete", "insert_after", "insert_before"
+    op: str  # "update", "create", "delete", "insert_after", "insert_before", "overwrite"
     file_path: str
     # update: search + replace
     search: str = ""
@@ -145,6 +157,7 @@ class LayerContext:
     readable_roots: list[str]  # 当前层可读的所有目录
     parent_history: list[dict]  # 下层运行历史
     parent_summary: str = ""
+    parent_context_files: list[str] = field(default_factory=list)
     max_depth: int = 3  # 递归深度上限
     max_spawn_calls: int = 2  # 每层最大 spawn 次数
     spawn_calls_used: int = 0  # 已 spawn 次数
@@ -193,27 +206,72 @@ class LayerContext:
 
         if self.parent_summary:
             parts.append(f"### Parent Summary\n{self.parent_summary}")
+        if self.parent_context_files:
+            parts.append("### Full Parent Context Files")
+            parts.extend(
+                f"- Read `{path}` for the complete untruncated parent context."
+                for path in self.parent_context_files
+            )
         if self.parent_history:
-            parts.append("### Parent Run History")
-            for h in self.parent_history[-20:]:
-                status = "ACCEPTED" if h.get("accepted") else "REJECTED"
-                before = h.get("before", 0)
-                after = h.get("after", 0)
-                header = f"Iteration {h.get('iteration', '?')} [{status}] {before:.2f} → {after:.2f}"
-                parts.append(header)
-                parts.append(f"  Diagnosis: {h.get('diagnosis', 'N/A')}")
-                parts.append(f"  Rationale: {h.get('rationale', 'N/A')}")
-                diffs = h.get("diffs", [])
-                for d in diffs:
-                    if isinstance(d, dict):
-                        fp = d.get("file_path", "?")
-                        search = d.get("search", "")[:200]
-                        replace = d.get("replace", "")[:200]
-                    else:
-                        fp = getattr(d, "file_path", "?")
-                        search = getattr(d, "search", "")[:200]
-                        replace = getattr(d, "replace", "")[:200]
-                    parts.append(f"  File: {fp} SEARCH: {search} REPLACE: {replace}")
+            parts.append("### Parent (L1) Recent Run Snapshot")
+            for h in self.parent_history[-30:]:
+                action = h.get("action", h.get("iteration", "?"))
+                step = h.get("step", "?")
+                if action == "observe":
+                    parts.append(
+                        f"  [Step {step}] OBSERVE: {h.get('n_trajectories', 0)} trajectories, "
+                        f"mean_f1={h.get('mean_f1', 0)}"
+                    )
+                elif action == "analyze":
+                    patterns = h.get("patterns", [])
+                    parts.append(f"  [Step {step}] ANALYZE: {len(patterns)} patterns")
+                    for p in patterns[:3]:
+                        if isinstance(p, dict):
+                            parts.append(
+                                f"    - [{p.get('severity', '?')}] {p.get('pattern', '')[:100]}"
+                                f" (file: {p.get('affected_file', 'N/A')})"
+                            )
+                        else:
+                            parts.append(f"    - {str(p)[:120]}")
+                elif action == "checkpoint_candidate":
+                    ops = h.get("ops", [])
+                    n_ops = len(ops) if isinstance(ops, list) else 0
+                    files = (
+                        list(
+                            {
+                                op.get("file_path", "?")
+                                for op in ops[:5]
+                                if isinstance(op, dict)
+                            }
+                        )
+                        if isinstance(ops, list)
+                        else []
+                    )
+                    parts.append(
+                        f"  [Step {step}] CHECKPOINT: {h.get('label', '?')} "
+                        f"ok={h.get('ok', '?')} ops={n_ops} files={files} "
+                        f"rationale={h.get('rationale', '')[:100]}"
+                    )
+                elif action == "eval_candidate":
+                    status = "ACCEPTED" if h.get("accepted") else "REJECTED"
+                    parts.append(
+                        f"  [Step {step}] EVAL: {h.get('label', '?')} [{status}] "
+                        f"{h.get('before_score', 0):.2f} → {h.get('after_score', 0):.2f}"
+                    )
+                    if h.get("error"):
+                        parts.append(f"    error: {h['error'][:200]}")
+                elif action == "accept_candidate":
+                    parts.append(
+                        f"  [Step {step}] ACCEPT: {h.get('label', '?')} score={h.get('score', 0):.2f}"
+                    )
+                elif action == "reject_candidate":
+                    parts.append(
+                        f"  [Step {step}] REJECT: {h.get('label', '?')} "
+                        f"reason={h.get('reason', '')[:150]}"
+                    )
+                else:
+                    # fallback: 旧格式或其他 action
+                    parts.append(f"  [{action}] {json.dumps(h, default=str)[:200]}")
         parts.append(
             f"Spawn budget: {self.spawn_calls_used}/{self.max_spawn_calls}, max_depth={self.max_depth}"
         )
@@ -409,11 +467,7 @@ class OptimizationBudget:
     no_improve_count: int = 0
 
     def reached_limit(self) -> bool:
-        return (
-            self.step_count >= self.max_steps
-            or self.llm_calls_used >= self.max_llm_calls
-            or self.evals_used >= self.max_evals
-        )
+        return self.step_count >= self.max_steps or self.evals_used >= self.max_evals
 
     def stagnation_detected(self) -> bool:
         return self.no_improve_count >= self.max_no_improve_steps

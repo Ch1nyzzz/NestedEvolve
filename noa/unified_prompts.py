@@ -68,4 +68,5 @@ UNIFIED_AGENT_INITIAL = """\
 {layer_context}
 
 Begin your optimization. Start by observing the current system behavior.
+NOTE: Do NOT try to read all source files at once. Use read_source_file selectively based on diagnosis results.
 """

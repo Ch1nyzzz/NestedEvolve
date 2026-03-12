@@ -6,6 +6,7 @@ import os
 from typing import Callable
 
 from noa.core.protocol import LayerContext, OptimizationBudget, SystemDescription
+from noa.runtime import bind_scope, configure_layer_logging, update_current_run
 from noa.stages.initiator import initiate
 from utils.llm import DEFAULT_MODEL
 
@@ -37,6 +38,8 @@ class NOptimizer:
         test_set: list | None = None,
         train_sample_size: int = 25,
         top_k: int = 3,
+        initial_baseline_score: float | None = None,
+        wall_budget_sec: float | None = None,
     ):
         self.source_dir = source_dir
         self.target_factory = target_factory
@@ -51,6 +54,8 @@ class NOptimizer:
         self.test_set = test_set
         self.train_sample_size = train_sample_size
         self.top_k = top_k
+        self.initial_baseline_score = initial_baseline_score
+        self.wall_budget_sec = wall_budget_sec
 
         max_spawn = layer_context.max_spawn_calls if layer_context else 2
         self.budget = OptimizationBudget(
@@ -79,14 +84,6 @@ class NOptimizer:
         from noa.tools.probe import ComponentProbe
         from noa.unified_agent import UnifiedOptimizerAgent
 
-        print("\n[NOA] === Initiate ===")
-        self.sys_desc = initiate(
-            source_dir=self.source_dir,
-            model=self.model,
-            system_description=self.system_description,
-        )
-        print(f"[NOA] Workflow: {self.sys_desc.workflow_summary}")
-
         layer_context = self.layer_context or LayerContext(
             layer_id="L1",
             level=1,
@@ -94,60 +91,83 @@ class NOptimizer:
             readable_roots=[self.source_dir],
             parent_history=[],
         )
+        with bind_scope(layer_id=layer_context.layer_id):
+            configure_layer_logging(layer_context.layer_id)
+            update_current_run(status="running", active_layer=layer_context.layer_id)
 
-        layer_label = f"l{layer_context.level}"
-        target_name = os.path.basename(self.source_dir.rstrip("/"))
-        ws_dir = os.path.join(
-            self._project_root, ".noa_runs", f"{target_name}_unified_{layer_label}"
-        )
-        sandbox = SandboxManager(self.source_dir, ws_dir, layer_context)
-        sandbox.save_accepted_snapshot()
-        traj_store = TrajectoryStore(os.path.join(ws_dir, "trajectories"))
+            print("\n[NOA] === Initiate ===")
+            self.sys_desc = initiate(
+                source_dir=self.source_dir,
+                model=self.model,
+                system_description=self.system_description,
+            )
+            print(f"[NOA] Workflow: {self.sys_desc.workflow_summary}")
 
-        probe = None
-        try:
-            p = ComponentProbe(self.target, self.sys_desc)
-            if p.components:
-                probe = p
-        except Exception:
-            pass
+            layer_label = f"l{layer_context.level}"
+            target_name = os.path.basename(self.source_dir.rstrip("/"))
+            ws_dir = os.path.join(
+                self._project_root, ".noa_runs", f"{target_name}_unified_{layer_label}"
+            )
+            sandbox = SandboxManager(self.source_dir, ws_dir, layer_context)
+            sandbox.save_accepted_snapshot()
+            traj_store = TrajectoryStore(os.path.join(ws_dir, "trajectories"))
 
-        budget = OptimizationBudget(
-            **{
-                k: getattr(self.budget, k)
-                for k in OptimizationBudget.__dataclass_fields__
-            }
-        )
+            probe = None
+            try:
+                p = ComponentProbe(self.target, self.sys_desc)
+                if p.components:
+                    probe = p
+            except Exception:
+                pass
 
-        agent = UnifiedOptimizerAgent(
-            sys_desc=self.sys_desc,
-            source_dir=self.source_dir,
-            target_factory=self.target_factory,
-            target=self.target,
-            dataset=self.dataset,
-            eval_fn=self.eval_fn,
-            score_fn=self.score_fn,
-            model=self.model,
-            layer_context=layer_context,
-            budget=budget,
-            sandbox_manager=sandbox,
-            trajectory_store=traj_store,
-            component_probe=probe,
-            observer_search_roots=self.observer_search_roots,
-            noa_dir=self.noa_dir,
-            project_root=self._project_root,
-            dataset_pickle_path=self.dataset_pickle_path,
-            spawn_config=self.spawn_config,
-            train_pool=self.train_pool,
-            test_set=self.test_set,
-            train_sample_size=self.train_sample_size,
-            n_samples=self.n_samples,
-            top_k=self.top_k,
-        )
+            budget = OptimizationBudget(
+                **{
+                    k: getattr(self.budget, k)
+                    for k in OptimizationBudget.__dataclass_fields__
+                }
+            )
 
-        result = agent.run()
-        self.history = result.get("history", [])
-        return result
+            # wall_budget_sec: 显式传入则用，否则用默认 4h
+            from noa.unified_agent import DEFAULT_WALL_BUDGET_SEC
+
+            _wbs = (
+                self.wall_budget_sec
+                if self.wall_budget_sec is not None
+                else DEFAULT_WALL_BUDGET_SEC
+            )
+
+            agent = UnifiedOptimizerAgent(
+                sys_desc=self.sys_desc,
+                source_dir=self.source_dir,
+                target_factory=self.target_factory,
+                target=self.target,
+                dataset=self.dataset,
+                eval_fn=self.eval_fn,
+                score_fn=self.score_fn,
+                model=self.model,
+                layer_context=layer_context,
+                budget=budget,
+                sandbox_manager=sandbox,
+                trajectory_store=traj_store,
+                component_probe=probe,
+                observer_search_roots=self.observer_search_roots,
+                noa_dir=self.noa_dir,
+                project_root=self._project_root,
+                dataset_pickle_path=self.dataset_pickle_path,
+                spawn_config=self.spawn_config,
+                train_pool=self.train_pool,
+                test_set=self.test_set,
+                train_sample_size=self.train_sample_size,
+                n_samples=self.n_samples,
+                top_k=self.top_k,
+                initial_baseline_score=self.initial_baseline_score,
+                wall_budget_sec=_wbs,
+            )
+
+            result = agent.run()
+            self.history = result.get("history", [])
+            update_current_run(active_layer=layer_context.layer_id, status="running")
+            return result
 
     def __call__(self, **kwargs) -> dict:
         return self.run()

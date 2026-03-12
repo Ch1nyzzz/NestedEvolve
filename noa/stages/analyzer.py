@@ -136,7 +136,15 @@ def analyze_incremental(
     # 快照当前 pool 状态，所有并行调用共享同一份上下文
     pool_snapshot = pool.to_context_str()
     sys_context = sys_desc.to_context_str()
-    source_code = sys_desc.get_source_context()
+    # L2+: 只传文件索引，让 agent 通过工具按需读取源码
+    is_meta = bool(layer_context and "META-OPTIMIZER" in layer_context)
+    if is_meta:
+        source_code = (
+            "## Source File Index (use read_source_file to inspect details)\n"
+            + sys_desc.get_source_index()
+        )
+    else:
+        source_code = sys_desc.get_source_context()
     trajectory_quality = _trajectory_quality_context(trajectories, analyzed)
 
     # 构建 eval feedback 上下文
@@ -199,6 +207,7 @@ def analyze_incremental(
             budget_exhausted_prompt="Tool call budget exhausted. Output your diagnosis now as JSON.",
             invalid_json_prompt="Your last response was not valid JSON list of patterns. Output ONLY valid JSON now.",
             stats=loop_stats,
+            wall_timeout_sec=600,  # 单条轨迹分析最多 10 分钟
         )
         if stats is not None:
             stats["llm_calls"] = stats.get("llm_calls", 0) + loop_stats.get(

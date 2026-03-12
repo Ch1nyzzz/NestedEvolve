@@ -49,7 +49,7 @@ def f1_score(prediction: str, ground_truth: str) -> float:
 def evaluate_batch(
     pipeline,
     dataset: list,
-    max_workers: int = 10,
+    max_workers: int = 25,
 ) -> dict:
     """并行评估 pipeline，返回 mean_f1 + per_example 详情。"""
 

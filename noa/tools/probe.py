@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import traceback
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 from noa.core.protocol import SystemDescription
+from noa.runtime import run_forked
 
 
 class ComponentProbe:
@@ -52,15 +51,30 @@ class ComponentProbe:
         comp = self.components[name]
         if not isinstance(inputs, dict):
             inputs = {"input": inputs}
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(comp.forward, **inputs)
-            try:
-                result = future.result(timeout=self.timeout)
-                return result if isinstance(result, dict) else {"output": result}
-            except FuturesTimeoutError:
-                return {"error": f"Component '{name}' timed out after {self.timeout}s"}
-            except Exception:
-                return {"error": traceback.format_exc()[-500:]}
+
+        def _invoke():
+            result = comp.forward(**inputs)
+            return result if isinstance(result, dict) else {"output": result}
+
+        managed = run_forked(
+            _invoke,
+            timeout_sec=self.timeout,
+            kind="probe_component",
+            heartbeat_message=f"component {name}",
+        )
+        if managed.ok:
+            return managed.payload
+        if managed.error_type == "infra_timeout":
+            return {
+                "error": f"Component '{name}' timed out after {self.timeout}s",
+                "error_type": managed.error_type,
+            }
+        return {
+            "error": (managed.stderr_tail or managed.error or "probe child crashed")[
+                -500:
+            ],
+            "error_type": managed.error_type or "runtime_crash",
+        }
 
     def run_from(self, start_component: str, inputs: dict) -> dict:
         """从指定组件开始运行后续管道，返回最终输出。"""

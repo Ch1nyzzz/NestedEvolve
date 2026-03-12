@@ -1,6 +1,6 @@
-"""直接 spawn L2 meta-optimizer，跳过 L1 优化。
+"""直接 spawn PubMedQA 的 L2 meta-optimizer，跳过 L1 优化。
 
-基于上次 L1 运行的结果（results_nested.json），构造 L2 所需的上下文，
+基于上次 L1 运行的结果（results_pubmedqa_nested.json），构造 L2 所需上下文，
 直接运行 L2 优化 noa/ 框架代码。
 """
 
@@ -17,61 +17,58 @@ from noa.engine import NOptimizer
 from noa.runtime import update_current_run
 from noa.subprocess_runner import run_layer_subprocess, serialize_dataset
 from noa.workspace import WorkspaceManager
-from utils.data import load_hotpotqa
+from utils.data import load_pubmedqa
 from utils.llm import resolve_model
 
 
 def main():
     load_dotenv()
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/hotpotqa_nested.json"
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/pubmedqa_nested.json"
     with open(config_path) as f:
         cfg = json.load(f)
 
-    # 读取上次 L1 结果
-    results_path = sys.argv[2] if len(sys.argv) > 2 else "results_nested.json"
+    results_path = sys.argv[2] if len(sys.argv) > 2 else "results_pubmedqa_nested.json"
     with open(results_path) as f:
         prev_results = json.load(f)
 
     data = cfg.get("data", {})
     opt = cfg.get("optimizer", {})
     spawn = cfg.get("spawn", {})
-    output = "results_l2_only.json"
+    output = "results_pubmedqa_l2_only.json"
 
-    model = resolve_model(opt.get("model", "gpt-4.1-mini"))
+    model = resolve_model(opt.get("model", "together_ai/moonshotai/Kimi-K2.5"))
     project_root = Path(__file__).resolve().parent.parent
-    source_dir = str(project_root / "target_systems" / "hotpotqa_rag")
+    source_dir = str(project_root / "target_systems" / "pubmedqa")
 
-    # 使用 WorkspaceManager 隔离，避免直接修改原始 noa/ 代码
-    ws = WorkspaceManager(str(project_root), source_dir, run_id="l2_only")
+    ws = WorkspaceManager(str(project_root), source_dir, run_id="pubmedqa_l2_only")
     ws_noa, ws_source = ws.setup()
     noa_dir = ws_noa
     source_dir = ws_source
-    print(f"[L2-only] Workspace ready: {ws.run_dir}")
+    print(f"[PubMedQA L2-only] Workspace ready: {ws.run_dir}")
 
-    # 加载数据: train/test 完全隔离
-    total_n = data.get("total_n", data.get("n", 300))
+    total_n = data.get("total_n", 500)
     test_n = data.get("test_n", 50)
-    train_sample_size = data.get("train_sample_size", 25)
-    print(f"Loading HotpotQA data (total={total_n})...")
-    all_data = load_hotpotqa(split=data.get("split", "validation"), n=total_n)
+    train_sample_size = data.get("train_sample_size", 10)
+    split = data.get("split", "train")
+
+    print(f"Loading PubMedQA data (total={total_n}, split={split})...")
+    all_data = load_pubmedqa(split=split, n=total_n, data_dir=source_dir)
 
     rng = random.Random(42)
     test_set = rng.sample(all_data, min(test_n, len(all_data)))
     test_ids = {id(x) for x in test_set}
     train_pool = [x for x in all_data if id(x) not in test_ids]
-    dataset = train_pool  # dataset 传给 subprocess 的是 train_pool
+    dataset = train_pool
     print(f"Test set: {len(test_set)} samples (fixed seed=42)")
     print(
         f"Train pool: {len(train_pool)} samples (sample {train_sample_size} per round)"
     )
 
-    # 序列化 dataset + train/test
     cache_dir = os.path.join(str(project_root), ".noa_cache")
     dpp = serialize_dataset(dataset, cache_dir=cache_dir)
     train_pool_pp = serialize_dataset(train_pool, cache_dir=cache_dir)
     test_set_pp = serialize_dataset(test_set, cache_dir=cache_dir)
 
-    # 从上次结果构造 parent context
     l1_result = prev_results["rounds"][0]["l1_result"]
     baseline_score = prev_results["baseline_score"]
     final_score = prev_results["final_score"]
@@ -84,9 +81,9 @@ def main():
     )
 
     print(f"L1 context: {parent_summary}")
-    print(f"L1 accepted patches: {[h['label'] for h in parent_history]}")
-
-    # --- 构造 L2 的 target/eval/score ---
+    print(
+        f"L1 history actions: {[h.get('action', h.get('label', '?')) for h in parent_history]}"
+    )
 
     ml1 = spawn.get("mini_l1", {})
 
@@ -99,12 +96,12 @@ def main():
                 target_source_dir=source_dir,
                 dataset_pickle_path=dpp,
                 layer_level=1,
-                max_steps=ml1.get("max_steps", opt.get("max_steps", 50)),
-                n_samples=ml1.get("n_samples", opt.get("n_samples", 50)),
-                max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 150)),
-                max_evals=ml1.get("max_evals", opt.get("max_evals", 20)),
+                max_steps=ml1.get("max_steps", opt.get("max_steps", 10)),
+                n_samples=ml1.get("n_samples", opt.get("n_samples", 10)),
+                max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 80)),
+                max_evals=ml1.get("max_evals", opt.get("max_evals", 8)),
                 max_no_improve_steps=ml1.get(
-                    "max_no_improve_steps", opt.get("max_no_improve_steps", 8)
+                    "max_no_improve_steps", opt.get("max_no_improve_steps", 4)
                 ),
                 model=model,
                 isolate_source=True,
@@ -113,7 +110,7 @@ def main():
                 test_set_pickle_path=test_set_pp,
                 train_sample_size=train_sample_size,
                 top_k=opt.get("top_k", 3),
-                timeout=ml1.get("timeout", 14400),
+                timeout=ml1.get("timeout", 28800),
             )
             return SimpleNamespace(
                 answer=str(result.get("final_score", 0)),
@@ -151,12 +148,9 @@ def main():
             out["subprocess_errors"] = errors
         return out
 
-    # 每次 eval 跑 1 个完整 L1
     child_dataset = [
         SimpleNamespace(question="opt_run_1", answer="0"),
     ]
-
-    # --- L2 LayerContext ---
 
     child_layer_context = LayerContext(
         layer_id="L2",
@@ -166,33 +160,31 @@ def main():
         parent_history=parent_history,
         parent_summary=parent_summary,
         max_depth=2,
-        max_spawn_calls=0,  # L2 不再 spawn
+        max_spawn_calls=0,
     )
 
-    # --- 启动 L2 ---
-
     l2_cfg = spawn.get("l2", {})
-    print(f"\n{'='*60}")
-    print("Starting L2 meta-optimizer directly")
+    print(f"\n{'=' * 60}")
+    print("Starting PubMedQA L2 meta-optimizer directly")
     print(f"  noa_dir: {noa_dir}")
     print(f"  model: {model}")
-    print(f"  max_steps: {l2_cfg.get('max_steps', 12)}")
-    print(f"  max_evals: {l2_cfg.get('max_evals', 8)}")
+    print(f"  max_steps: {l2_cfg.get('max_steps', 5)}")
+    print(f"  max_evals: {l2_cfg.get('max_evals', 5)}")
     print(f"  mini_l1 config: {ml1}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     l2 = NOptimizer(
         source_dir=noa_dir,
         target_factory=child_target_factory,
         dataset=child_dataset,
         eval_fn=child_eval_fn,
-        max_steps=l2_cfg.get("max_steps", 12),
-        n_samples=l2_cfg.get("n_samples", 2),
+        max_steps=l2_cfg.get("max_steps", 5),
+        n_samples=l2_cfg.get("n_samples", 1),
         model=model,
         score_fn=child_score_fn,
-        max_llm_calls=l2_cfg.get("max_llm_calls", 80),
-        max_evals=l2_cfg.get("max_evals", 10),
-        max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 5),
+        max_llm_calls=l2_cfg.get("max_llm_calls", 60),
+        max_evals=l2_cfg.get("max_evals", 5),
+        max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 3),
         layer_context=child_layer_context,
         observer_search_roots=[noa_dir],
         dataset_pickle_path=dpp,
@@ -203,30 +195,33 @@ def main():
     result = l2.run()
     update_current_run(status="completed", active_layer=None, active_spawn_id=None)
 
-    # 输出
     accepted = result.get("accepted", 0) or 0
-    print(f"\n{'='*60}")
-    print("L2 Result:")
+    print(f"\n{'=' * 60}")
+    print("PubMedQA L2 Result:")
     print(f"  Baseline score:  {result.get('baseline_score', 0):.2f}")
     print(f"  Final score:     {result.get('final_score', 0):.2f}")
     print(f"  Steps:           {result.get('steps', 0)}")
     print(f"  Accepted:        {accepted}")
     print(f"  NOA modified:    {accepted > 0}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
-    if output:
-        out = {
-            "l2_result": result,
-            "l1_context": {
-                "baseline_score": baseline_score,
-                "final_score": final_score,
-                "accepted_patches": parent_history,
-                "parent_summary": parent_summary,
+    with open(output, "w") as f:
+        json.dump(
+            {
+                "l2_result": result,
+                "l1_context": {
+                    "baseline_score": baseline_score,
+                    "final_score": final_score,
+                    "accepted_patches": parent_history,
+                    "parent_summary": parent_summary,
+                },
             },
-        }
-        with open(output, "w") as f:
-            json.dump(out, f, indent=2, ensure_ascii=False, default=str)
-        print(f"Results saved to {output}")
+            f,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
+    print(f"Results saved to {output}")
 
 
 if __name__ == "__main__":

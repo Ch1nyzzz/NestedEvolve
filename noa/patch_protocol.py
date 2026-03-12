@@ -40,6 +40,27 @@ def validate_patch_ops(
                 )
             continue
 
+        if op.op == "overwrite":
+            if normalized not in file_map:
+                errors.append(
+                    PatchValidationError(
+                        op_index=i,
+                        code="file_not_found",
+                        file_path=op.file_path,
+                        message=f"文件不存在: {op.file_path}",
+                    )
+                )
+            elif not op.content:
+                errors.append(
+                    PatchValidationError(
+                        op_index=i,
+                        code="empty_content",
+                        file_path=op.file_path,
+                        message="overwrite 的 content 为空",
+                    )
+                )
+            continue
+
         if op.op == "delete":
             if normalized not in file_map:
                 errors.append(
@@ -96,6 +117,10 @@ def apply_patch_ops(
         normalized = os.path.normpath(op.file_path)
 
         if op.op == "create":
+            file_map[normalized] = op.content
+            modified.add(normalized)
+
+        elif op.op == "overwrite":
             file_map[normalized] = op.content
             modified.add(normalized)
 

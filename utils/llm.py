@@ -1,29 +1,61 @@
-"""LLM 调用封装 — 基于 litellm 的薄封装，支持指数退避重试。"""
+"""LLM 调用封装 — 基于 litellm 的薄封装，支持指数退避重试 + 进程级硬超时。"""
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
 import litellm
 
+from noa.runtime import (
+    bind_scope,
+    current_scope,
+    llm_log_path,
+    run_subprocess,
+    scope_env,
+)
+
 litellm.drop_params = True
 
-# 从环境变量读取 provider，默认 anthropic
+_CONSECUTIVE_FAIL_THRESHOLD = 5
+
+
+class _CircuitBreaker:
+    """记录连续失败次数，避免把 provider 抖动误判为正常请求。"""
+
+    def __init__(self, threshold: int = _CONSECUTIVE_FAIL_THRESHOLD):
+        self._threshold = threshold
+        self._consecutive_failures = 0
+        self._lock = threading.Lock()
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+
+    def record_failure(self) -> bool:
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._threshold:
+                self._consecutive_failures = 0
+                return True
+            return False
+
+
+_circuit_breaker = _CircuitBreaker()
+
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 
-# VT ARC API 配置
 _VT_API_BASE = "https://llm-api.arc.vt.edu/api/v1"
 _VT_API_KEY = os.getenv("VT_API_KEY")
 _VT_DEFAULT_MODEL = "Kimi-K2.5"
-
-# Together AI 配置（litellm 原生支持，只需 TOGETHER_API_KEY 环境变量）
 _TOGETHER_DEFAULT_MODEL = os.getenv("TOGETHER_MODEL", "moonshotai/Kimi-K2.5")
 
-# 模型映射：openai 模型名 → anthropic 模型名
 _ANTHROPIC_MODEL_MAP = {
     "gpt-5-nano": "claude-haiku-4-5-20251001",
     "gpt-4.1-mini": "claude-haiku-4-5-20251001",
@@ -52,15 +84,14 @@ def _env_float(name: str, default: float) -> float:
 
 
 LLM_TIMEOUT_SEC = _env_float("LLM_TIMEOUT_SEC", 120.0)
+_HARD_TIMEOUT_SEC = _env_float("LLM_HARD_TIMEOUT_SEC", 300.0)
 
-# 全局速率限制器 — 令牌桶算法，线程安全
-# 按 provider 自动选择默认 RPM（可通过 LLM_RPM_LIMIT 覆盖）
 _DEFAULT_RPM = {"anthropic": 3800, "openai": 3800, "vt": 55, "together": 55}
 RPM_LIMIT = int(os.getenv("LLM_RPM_LIMIT", str(_DEFAULT_RPM.get(LLM_PROVIDER, 55))))
 
 
 class _RateLimiter:
-    """自适应速率限制器：从响应头读取实际 RPM 上限，动态调整间隔。"""
+    """自适应速率限制器：从响应头读取 RPM 并动态更新间隔。"""
 
     def __init__(self, rpm: int):
         self._rpm = rpm
@@ -68,7 +99,7 @@ class _RateLimiter:
         self._lock = threading.Lock()
         self._last = 0.0
 
-    def acquire(self):
+    def acquire(self) -> None:
         with self._lock:
             now = time.monotonic()
             wait = self._last + self._interval - now
@@ -76,25 +107,30 @@ class _RateLimiter:
                 time.sleep(wait)
             self._last = time.monotonic()
 
-    def update_from_response(self, resp):
-        """从 litellm 响应头中提取动态 RPM 并更新间隔。"""
-        headers = getattr(resp, "_hidden_params", {}).get("additional_headers", {})
-        # 优先动态限制，回退到基础限制
+    def update_from_response(self, resp) -> None:
+        headers = getattr(resp, "_response_headers", None) or {}
+        # 优先读动态限制，fallback 到静态限制
         raw = headers.get("x-ratelimit-limit-dynamic") or headers.get(
             "x-ratelimit-limit"
         )
         if not raw:
             return
         try:
-            new_rpm = int(raw)
+            limit = int(raw)
         except (ValueError, TypeError):
             return
+        # Together AI 用 reset 窗口（秒）计限制，换算为 RPM
+        try:
+            reset_sec = int(headers.get("x-ratelimit-reset", 1))
+        except (ValueError, TypeError):
+            reset_sec = 1
+        new_rpm = limit * 60 // max(reset_sec, 1)
         if new_rpm <= 0 or new_rpm == self._rpm:
             return
         with self._lock:
             self._rpm = new_rpm
-            self._interval = 60.0 / (new_rpm * 0.9)  # 留 10% 余量
-        print(f"[LLM] 速率限制自动调整: {new_rpm} RPM")
+            self._interval = 60.0 / (new_rpm * 0.9)
+        print(f"[LLM] 速率限制自动调整: {new_rpm} RPM (raw={limit}/{reset_sec}s)")
 
 
 _rate_limiter = _RateLimiter(RPM_LIMIT)
@@ -112,10 +148,9 @@ def resolve_model(model: str) -> str:
 
 
 def _vt_kwargs() -> dict:
-    """VT ARC API 的额外参数。延迟读取 key 以确保 dotenv 已加载。"""
+    """VT ARC API 的额外参数。"""
     if LLM_PROVIDER == "vt":
         key = os.getenv("VT_API_KEY") or _VT_API_KEY
-        # litellm 对 openai/ 前缀会读 OPENAI_API_KEY 环境变量，需覆盖
         os.environ["OPENAI_API_KEY"] = key or ""
         os.environ["OPENAI_API_BASE"] = _VT_API_BASE
         return {"api_base": _VT_API_BASE, "api_key": key}
@@ -145,6 +180,126 @@ class LLMResponseWithTools:
     latency_ms: float = 0.0
 
 
+def _temp_json_path(prefix: str) -> str:
+    scope = current_scope()
+    base_dir = (
+        os.path.join(scope.run_dir, "state", "llm")
+        if scope.run_dir
+        else tempfile.gettempdir()
+    )
+    os.makedirs(base_dir, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=".json", dir=base_dir)
+    os.close(fd)
+    return path
+
+
+def _load_worker_payload(response_path: str) -> dict:
+    if not os.path.exists(response_path):
+        return {}
+    try:
+        with open(response_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _cleanup_temp_paths(*paths: str) -> None:
+    for path in paths:
+        if path and os.path.exists(path):
+            os.remove(path)
+
+
+def _raise_from_worker_payload(payload: dict, *, model: str) -> None:
+    error = payload.get("error", "Unknown LLM worker failure")
+    error_type = payload.get("error_type", "runtime_crash")
+    if error_type == "timeout":
+        raise litellm.Timeout(
+            message=error,
+            model=model,
+            llm_provider=model.split("/")[0],
+        )
+    raise RuntimeError(f"{error_type}: {error}")
+
+
+def _compat_response_from_worker(payload: dict):
+    tool_calls = []
+    for tc in payload.get("tool_calls", []):
+        tool_calls.append(
+            SimpleNamespace(
+                id=tc.get("id", ""),
+                function=SimpleNamespace(
+                    name=tc.get("name", ""),
+                    arguments=json.dumps(tc.get("arguments", {}), ensure_ascii=False),
+                ),
+            )
+        )
+    msg = SimpleNamespace(content=payload.get("text"), tool_calls=tool_calls)
+    choice = SimpleNamespace(
+        message=msg,
+        finish_reason=payload.get("finish_reason", "stop"),
+    )
+    return SimpleNamespace(
+        choices=[choice],
+        usage=payload.get("usage", {}),
+        _hidden_params={
+            "additional_headers": payload.get("additional_headers", {}) or {}
+        },
+        latency_ms=payload.get("latency_ms", 0.0),
+    )
+
+
+def _completion_with_hard_timeout(**kwargs):
+    """将单次 litellm.completion 放进独立 worker 子进程。"""
+    request_id = uuid.uuid4().hex[:12]
+    request_path = _temp_json_path(f"llm_req_{request_id}_")
+    response_path = _temp_json_path(f"llm_resp_{request_id}_")
+    log_path = llm_log_path(request_id)
+    request = {"request_id": request_id, "kwargs": kwargs}
+    with open(request_path, "w", encoding="utf-8") as f:
+        json.dump(request, f, ensure_ascii=False, default=str)
+
+    command = [
+        os.sys.executable,
+        "-m",
+        "noa.runtime.llm_worker",
+        request_path,
+        response_path,
+        log_path,
+    ]
+
+    try:
+        with bind_scope(request_id=request_id):
+            proc = run_subprocess(
+                command,
+                timeout_sec=_HARD_TIMEOUT_SEC,
+                kind="llm_worker",
+                env=scope_env({"NOA_REQUEST_ID": request_id}),
+                log_path=log_path,
+                result_path=response_path,
+                stream_output=False,
+                heartbeat_message="llm request running",
+            )
+        payload = _load_worker_payload(response_path)
+        if proc.timed_out:
+            raise litellm.Timeout(
+                message=f"Hard timeout ({_HARD_TIMEOUT_SEC}s) - worker killed",
+                model=kwargs.get("model", "unknown"),
+                llm_provider=kwargs.get("model", "unknown").split("/")[0],
+            )
+        if not proc.ok and not payload:
+            raise RuntimeError(
+                proc.error
+                or proc.stderr_tail
+                or proc.stdout_tail
+                or f"llm worker exited with code {proc.returncode}"
+            )
+        if payload.get("ok") is not True:
+            _raise_from_worker_payload(payload, model=kwargs.get("model", "unknown"))
+        return _compat_response_from_worker(payload)
+    finally:
+        _cleanup_temp_paths(request_path, response_path)
+
+
 def llm_call(
     prompt: str,
     model: str = DEFAULT_MODEL,
@@ -163,7 +318,7 @@ def llm_call(
         try:
             _rate_limiter.acquire()
             t0 = time.time()
-            resp = litellm.completion(
+            resp = _completion_with_hard_timeout(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
@@ -173,14 +328,16 @@ def llm_call(
             )
             latency = (time.time() - t0) * 1000
             _rate_limiter.update_from_response(resp)
+            _circuit_breaker.record_success()
             return LLMResponse(
-                text=resp.choices[0].message.content.strip(),
+                text=(resp.choices[0].message.content or "").strip(),
                 usage=dict(resp.usage) if resp.usage else {},
                 latency_ms=round(latency, 1),
                 finish_reason=getattr(resp.choices[0], "finish_reason", "stop")
                 or "stop",
             )
         except Exception as e:
+            _circuit_breaker.record_failure()
             if attempt == MAX_RETRIES - 1:
                 raise
             wait = 2**attempt
@@ -197,7 +354,6 @@ def llm_call_with_tools(
 ) -> LLMResponseWithTools:
     """调用 LLM（带 tool calling），返回文本或工具调用列表。"""
     model = resolve_model(model)
-    # 无 tools 时，清理 messages 中的 tool_calls / tool role（Anthropic 不允许无 tools 定义时出现）
     if not tools:
         cleaned = []
         for m in messages:
@@ -222,12 +378,12 @@ def llm_call_with_tools(
         try:
             _rate_limiter.acquire()
             t0 = time.time()
-            resp = litellm.completion(**kwargs, **_vt_kwargs())
+            resp = _completion_with_hard_timeout(**kwargs, **_vt_kwargs())
             latency = (time.time() - t0) * 1000
             _rate_limiter.update_from_response(resp)
+            _circuit_breaker.record_success()
             msg = resp.choices[0].message
 
-            # 解析 tool_calls
             parsed_tools: list[ToolCall] = []
             if msg.tool_calls:
                 for tc in msg.tool_calls:
@@ -252,6 +408,7 @@ def llm_call_with_tools(
                 latency_ms=round(latency, 1),
             )
         except Exception as e:
+            _circuit_breaker.record_failure()
             if attempt == MAX_RETRIES - 1:
                 raise
             wait = 2**attempt

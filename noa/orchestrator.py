@@ -6,7 +6,8 @@ import os
 
 from noa.core.protocol import LayerContext
 from noa.engine import NOptimizer
-from noa.subprocess_runner import run_layer_subprocess, serialize_dataset
+from noa.runtime import update_current_run
+from noa.subprocess_runner import serialize_dataset
 from noa.workspace import WorkspaceManager
 from utils.llm import DEFAULT_MODEL
 
@@ -76,6 +77,13 @@ class Orchestrator:
         ws = WorkspaceManager(self.project_root, self.source_dir)
         ws_noa, ws_source = ws.setup()
         print(f"[Orchestrator] Workspace ready: {ws.run_dir}")
+        update_current_run(
+            run_id=ws.run_id,
+            run_dir=ws.run_dir,
+            status="running",
+            active_layer="L1",
+            active_spawn_id=None,
+        )
 
         rounds = []
 
@@ -114,39 +122,17 @@ class Orchestrator:
         ws.snapshot("after_round_0")
         rounds.append({"round": 0, "l1_result": result})
 
-        # Subsequent rounds: subprocess L1 restart after spawn_sublayer modified noa/
-        round_num = 1
-        while result.get("spawn_restart") and round_num <= self.max_spawn_calls:
-            print(
-                f"\n[Orchestrator] === Round {round_num}: Restarting L1 via subprocess (noa/ modified) ==="
-            )
-            result = run_layer_subprocess(
-                noa_dir=ws_noa,
-                project_root=self.project_root,
-                target_source_dir=ws_source,
-                dataset_pickle_path=self.dataset_pickle_path,
-                layer_level=1,
-                max_steps=self.l1_max_steps,
-                n_samples=self.l1_n_samples,
-                model=self.l1_model,
-                max_llm_calls=self.l1_max_llm_calls,
-                max_evals=self.l1_max_evals,
-                max_no_improve_steps=self.l1_max_no_improve_steps,
-                train_pool_pickle_path=self.train_pool_pickle_path,
-                test_set_pickle_path=self.test_set_pickle_path,
-                train_sample_size=self.train_sample_size,
-                top_k=self.top_k,
-            )
-            ws.snapshot(f"after_round_{round_num}")
-            rounds.append({"round": round_num, "l1_result": result})
-            round_num += 1
+        # L2 spawn 的 mini-L1 已包含 test eval，不再重跑 L1。
+        # final_score 由 _build_result 自动取 max(L1 final, L2 child_score)。
 
-        last = rounds[-1]["l1_result"]
-        return {
-            "final_score": last.get("final_score", 0),
+        best = max(rounds, key=lambda r: r["l1_result"].get("final_score", 0))
+        payload = {
+            "final_score": best["l1_result"].get("final_score", 0),
             "baseline_score": rounds[0]["l1_result"].get("baseline_score", 0),
             "rounds": rounds,
             "total_rounds": len(rounds),
             "run_dir": ws.run_dir,
             "snapshots": ws.list_snapshots(),
         }
+        update_current_run(status="completed", active_layer=None, active_spawn_id=None)
+        return payload

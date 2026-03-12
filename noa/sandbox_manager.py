@@ -7,6 +7,7 @@ import shutil
 
 from noa.core.protocol import PatchValidationError, StructuredPatch
 from noa.patch_protocol import apply_patch_ops
+from noa.runtime import bind_scope, run_forked
 from noa.stages.initiator import collect_sources
 
 
@@ -97,26 +98,70 @@ class SandboxManager:
         dataset,
         n_samples: int,
         seed: int = 42,
+        timeout_sec: float | None = None,
     ) -> dict:
-        """在 candidate 沙盒中运行评估，返回结构化结果。"""
+        """在 candidate 沙盒中运行评估，返回结构化结果。
+
+        返回字段:
+          ok: bool
+          status: success | timeout | crash
+          score: float
+          error: str (仅失败时)
+          error_type: str (仅失败时)
+          timed_out: bool
+          duration_sec: float
+        """
         import random
 
         rng = random.Random(seed)
         sampled = rng.sample(dataset, min(n_samples, len(dataset)))
-        try:
+        if timeout_sec is None:
+            timeout_sec = float(os.getenv("NOA_SANDBOX_EVAL_TIMEOUT_SEC", "14400"))
+
+        def _evaluate():
             target = target_factory(candidate_dir)
-            result = eval_fn(target, sampled)
-            out = {
-                "ok": True,
-                "score": result["score"],
-                "details": result.get("details", []),
+            return eval_fn(target, sampled)
+
+        with bind_scope(candidate_label=os.path.basename(candidate_dir)):
+            managed = run_forked(
+                _evaluate,
+                timeout_sec=timeout_sec,
+                kind="sandbox_eval",
+                heartbeat_message=f"evaluating {os.path.basename(candidate_dir)}",
+            )
+
+        if not managed.ok:
+            status = "timeout" if managed.timed_out else "crash"
+            error_msg = managed.error[:500] if managed.error else "Unknown error"
+            if managed.timed_out:
+                error_msg = (
+                    f"Sandbox eval timed out after {managed.duration_sec:.0f}s "
+                    f"(limit={timeout_sec:.0f}s). {error_msg}"
+                )
+            return {
+                "ok": False,
+                "status": status,
+                "score": 0.0,
+                "error": error_msg,
+                "error_type": "timeout"
+                if managed.timed_out
+                else (managed.error_type or "runtime_crash"),
+                "timed_out": managed.timed_out,
+                "duration_sec": managed.duration_sec,
             }
-            # 透传 subprocess 错误（L2 场景）
-            if result.get("subprocess_errors"):
-                out["subprocess_errors"] = result["subprocess_errors"]
-            return out
-        except Exception as e:
-            return {"ok": False, "score": 0.0, "error": str(e)[:500]}
+
+        result = managed.payload or {}
+        out = {
+            "ok": True,
+            "status": "success",
+            "score": result["score"],
+            "details": result.get("details", []),
+            "timed_out": False,
+            "duration_sec": managed.duration_sec,
+        }
+        if result.get("subprocess_errors"):
+            out["subprocess_errors"] = result["subprocess_errors"]
+        return out
 
     def accept_candidate(self, label: str) -> None:
         """将 candidate 提交到 source_dir。这是唯一的 commit 路径。"""
