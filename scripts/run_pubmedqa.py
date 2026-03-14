@@ -6,6 +6,7 @@ L1-only: 设 nesting.max_spawn_calls = 0
 
 import json
 import logging
+import os
 import random
 import sys
 from pathlib import Path
@@ -39,12 +40,12 @@ def _setup_logging(run_dir: Path):
     """把 noa 日志 + print 写到 run_dir/noa.log，静默 LiteLLM debug。"""
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "noa.log"
-    log_file = open(log_path, "a", encoding="utf-8")
+    log_file = open(log_path, "w", encoding="utf-8")
     # tee stdout → 文件（不 tee stderr，避免 LiteLLM curl dump）
     sys.stdout = _TeeWriter(log_file, sys.__stdout__)
 
     fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
-    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
@@ -79,7 +80,9 @@ def main():
     history = cfg.get("history", {})
     output = cfg.get("output")
 
-    model = opt.get("model", "together_ai/moonshotai/Kimi-K2.5")
+    from utils.llm import resolve_model
+
+    model = resolve_model(opt.get("model", "moonshotai/Kimi-K2.5"), opt.get("provider"))
     project_root = Path(__file__).resolve().parent.parent
     source_dir = str(project_root / "target_systems" / "pubmedqa")
 
@@ -94,18 +97,30 @@ def main():
         )
         print(f"Trajectory cleanup: {cleanup_result}")
 
-    # 数据: train/test 完全隔离
+    # 数据: train/val/test 三分隔离
     total_n = data.get("total_n", 500)
-    test_n = data.get("test_n", 50)
+    test_n = data.get("test_n", 200)
+    val_n = data.get("val_n", 50)
     train_sample_size = data.get("train_sample_size", 25)
+    eval_max_workers = max(1, int(data.get("eval_max_workers", 25)))
+    global_eval_max_workers = max(
+        eval_max_workers,
+        int(data.get("global_eval_max_workers", 50)),
+    )
+    os.environ["NOA_EVAL_MAX_WORKERS"] = str(eval_max_workers)
+    os.environ["NOA_GLOBAL_EVAL_MAX_WORKERS"] = str(global_eval_max_workers)
     print(f"Loading PubMedQA data (total={total_n})...")
     all_data = load_pubmedqa(split=data.get("split", "train"), n=total_n)
 
     rng = random.Random(42)
     test_set = rng.sample(all_data, min(test_n, len(all_data)))
     test_ids = {id(x) for x in test_set}
-    train_pool = [x for x in all_data if id(x) not in test_ids]
+    remaining = [x for x in all_data if id(x) not in test_ids]
+    val_set = rng.sample(remaining, min(val_n, len(remaining)))
+    val_ids = {id(x) for x in val_set}
+    train_pool = [x for x in remaining if id(x) not in val_ids]
     print(f"Test set: {len(test_set)} samples (fixed seed=42)")
+    print(f"Val set: {len(val_set)} samples")
     print(
         f"Train pool: {len(train_pool)} samples (sample {train_sample_size} per round)"
     )
@@ -119,18 +134,19 @@ def main():
         source_dir=source_dir,
         target_factory=target_factory,
         dataset=train_pool,
-        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=5),
+        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=eval_max_workers),
+        test_eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=eval_max_workers),
         score_fn=exact_match,
         l1_max_steps=opt.get("max_steps", 30),
         l1_n_samples=opt.get("n_samples", 30),
         l1_model=model,
-        l1_max_llm_calls=opt.get("max_llm_calls", 150),
-        l1_max_evals=opt.get("max_evals", 20),
+        l1_max_llm_calls=opt.get("max_llm_calls", 999999),
         l1_max_no_improve_steps=opt.get("max_no_improve_steps", 8),
         max_depth=nest.get("max_depth", 2),
         max_spawn_calls=nest.get("max_spawn_calls", 1),
         spawn_config=spawn,
         train_pool=train_pool,
+        val_set=val_set,
         test_set=test_set,
         train_sample_size=train_sample_size,
     )

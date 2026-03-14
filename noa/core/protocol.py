@@ -455,8 +455,7 @@ class OptimizationBudget:
     """优化预算 — 控制步数、LLM 调用、评估次数。"""
 
     max_steps: int = 20
-    max_llm_calls: int = 80
-    max_evals: int = 12
+    max_llm_calls: int = 999999
     max_no_improve_steps: int = 5
     target_delta: float = float("inf")
     max_spawn_calls: int = 2
@@ -467,7 +466,7 @@ class OptimizationBudget:
     no_improve_count: int = 0
 
     def reached_limit(self) -> bool:
-        return self.step_count >= self.max_steps or self.evals_used >= self.max_evals
+        return self.step_count >= self.max_steps
 
     def stagnation_detected(self) -> bool:
         return self.no_improve_count >= self.max_no_improve_steps
@@ -476,7 +475,7 @@ class OptimizationBudget:
         return {
             "steps": f"{self.step_count}/{self.max_steps}",
             "llm_calls": f"{self.llm_calls_used}/{self.max_llm_calls}",
-            "evals": f"{self.evals_used}/{self.max_evals}",
+            "evals": self.evals_used,
             "spawn_calls": f"{self.spawn_calls_used}/{self.max_spawn_calls}",
             "max_no_improve_steps": self.max_no_improve_steps,
             "no_improve_count": self.no_improve_count,

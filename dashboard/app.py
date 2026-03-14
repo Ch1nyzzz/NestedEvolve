@@ -1,8 +1,16 @@
 """Streamlit app for the local NOA runtime dashboard."""
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = APP_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import psutil
@@ -21,7 +29,7 @@ from dashboard.data import (
     resolve_detail_file,
 )
 
-ROOT = Path(__file__).resolve().parent.parent / ".noa_runs"
+ROOT = PROJECT_ROOT / ".noa_runs"
 
 
 def _process_tree_metrics(pid: int | None) -> dict[str, float | int | None]:
@@ -84,7 +92,6 @@ def _render_overview(snapshot: dict) -> None:
 
 def _render_llm(snapshot: dict) -> None:
     summary = snapshot["llm_summary"]
-    current_run = snapshot["current_run"]
     cols = st.columns(7)
     cols[0].metric("Total Requests", summary["total_requests"])
     cols[1].metric("Inflight", summary["inflight_requests"])
@@ -101,8 +108,12 @@ def _render_llm(snapshot: dict) -> None:
     cols[6].metric("Total Tokens", summary["total_tokens"])
 
     cols = st.columns(4)
-    cols[0].metric("Provider", str(current_run.get("llm_provider") or "-"))
-    cols[1].metric("RPM Limit", str(current_run.get("llm_rpm_limit") or "-"))
+    cols[0].metric(
+        "Configured Provider", str(snapshot.get("configured_provider") or "-")
+    )
+    cols[1].metric(
+        "Configured RPM Limit", str(snapshot.get("configured_rpm_limit") or "-")
+    )
     cols[2].metric("Models", ", ".join(summary["models"]) or "-")
     cols[3].metric("Errors", summary["error_count"])
 

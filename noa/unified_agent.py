@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from copy import deepcopy
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from noa.core.protocol import (
     LayerContext,
@@ -26,12 +26,17 @@ from noa.tools.probe import ComponentProbe
 from noa.trajectory_store import TrajectoryStore
 from noa.unified_prompts import UNIFIED_AGENT_INITIAL, UNIFIED_AGENT_SYSTEM
 
+if TYPE_CHECKING:
+    from noa.core.protocol import Trajectory
+
 # 默认总墙钟预算 (秒): 8 小时
 DEFAULT_WALL_BUDGET_SEC = 28800
 # 子操作预留余量 (秒): 给上层处理结果留时间
 _DEADLINE_MARGIN_SEC = 120
 # 拒绝启动 eval 的最低剩余时间 (秒)
 _MIN_REMAINING_FOR_EVAL_SEC = 300
+_DEFAULT_CANDIDATE_BATCH_SIZE = 3
+_MIN_AUTO_BATCH_SIZE = 2
 
 log = logging.getLogger(__name__)
 # 确保 log 输出到 stdout
@@ -67,12 +72,14 @@ class UnifiedOptimizerAgent:
         dataset_pickle_path: str | None = None,
         spawn_config: dict | None = None,
         train_pool: list | None = None,
+        val_set: list | None = None,
         test_set: list | None = None,
         train_sample_size: int = 25,
         n_samples: int = 30,
         top_k: int = 3,
         initial_baseline_score: float | None = None,
         wall_budget_sec: float = DEFAULT_WALL_BUDGET_SEC,
+        test_eval_fn=None,
     ):
         self.sys_desc = sys_desc
         self.source_dir = source_dir
@@ -80,6 +87,7 @@ class UnifiedOptimizerAgent:
         self.target = target
         self.dataset = dataset
         self.eval_fn = eval_fn
+        self.test_eval_fn = test_eval_fn or eval_fn
         self.score_fn = score_fn
         self.model = model
         self.layer_context = layer_context
@@ -93,6 +101,7 @@ class UnifiedOptimizerAgent:
         self.dataset_pickle_path = dataset_pickle_path
         self.spawn_config = spawn_config or {}
         self.train_pool = train_pool or dataset
+        self.val_set = val_set
         self.test_set = test_set or dataset
         self.train_sample_size = train_sample_size
         self.n_samples = n_samples
@@ -111,6 +120,8 @@ class UnifiedOptimizerAgent:
         self._current_score = 0.0
         self._best_score = 0.0
         self._baseline_score = 0.0
+        self._test_baseline_score = 0.0
+        self._val_baseline_score = 0.0
         self._candidate_scores: dict[str, float] = {}
         self._accepted_patches = 0
         self._step_count = 0
@@ -133,6 +144,16 @@ class UnifiedOptimizerAgent:
         self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}]
         # compact 计数器
         self._compact_chunk_counter = 0
+        # eval 结果缓存: ops_hash -> eval result dict
+        self._eval_result_cache: dict[str, dict] = {}
+        # trajectory 缓存: question -> Trajectory, 仅在 source 未变时有效
+        self._trajectory_cache: dict[str, "Trajectory"] = {}
+        self._traj_cache_source_version: int = 0
+        self._source_version: int = 0
+        self._analysis_round = 0
+        self._active_analysis_round = 0
+        self._candidate_checkpoint_counter = 0
+        self._default_candidate_batch_size = _DEFAULT_CANDIDATE_BATCH_SIZE
 
     def _refresh_file_map(self):
         """刷新源文件映射，包括 readable_roots 中的只读文件。"""
@@ -166,6 +187,53 @@ class UnifiedOptimizerAgent:
             return
         payload = {k: v for k, v in entry.items() if k != "action"}
         record_run_event(action, **payload)
+
+    def _mark_candidate_eval_status(
+        self, label: str, status: str, *, score: float | None = None
+    ) -> None:
+        meta = self._candidate_meta.get(label)
+        if not meta:
+            return
+        meta["eval_status"] = status
+        if score is not None:
+            meta["last_score"] = score
+
+    def _analysis_round_candidates(
+        self,
+        round_id: int,
+        *,
+        only_pending: bool = False,
+    ) -> list[str]:
+        if round_id <= 0:
+            return []
+        ranked: list[tuple[int, str]] = []
+        for label, meta in self._candidate_meta.items():
+            if meta.get("analysis_round") != round_id:
+                continue
+            if only_pending and meta.get("eval_status") != "pending":
+                continue
+            ranked.append((int(meta.get("checkpoint_index", 0)), label))
+        ranked.sort()
+        return [label for _, label in ranked]
+
+    def _auto_batch_labels_for(self, requested_label: str) -> list[str]:
+        requested_meta = self._candidate_meta.get(requested_label, {})
+        round_id = int(requested_meta.get("analysis_round", 0) or 0)
+        if round_id <= 0:
+            return [requested_label]
+        pending = self._analysis_round_candidates(round_id, only_pending=True)
+        if requested_label not in pending:
+            pending.append(requested_label)
+        deduped = list(dict.fromkeys(pending))
+        return deduped if len(deduped) >= _MIN_AUTO_BATCH_SIZE else [requested_label]
+
+    @staticmethod
+    def _compute_ops_hash(ops_summary: list[dict]) -> str:
+        """基于 patch ops 计算稳定哈希，用于 eval 缓存。"""
+        import hashlib
+
+        canonical = json.dumps(ops_summary, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
     def _compact_messages(self, messages: list[dict]) -> list[dict]:
         """压缩旧 messages: 原始记录存文件 + LLM 生成摘要 + 保留最近 KEEP_RECENT 条。
@@ -360,24 +428,42 @@ class UnifiedOptimizerAgent:
         )
 
     def _compute_baseline(self):
-        """用 test_set 跑一次 baseline 分数。"""
+        """用 test_set 跑一次 baseline（仅报告），用 val_set 作为滚动 baseline。"""
         if self._initial_baseline_score is not None:
             self._baseline_score = float(self._initial_baseline_score)
             self._current_score = self._baseline_score
+            self._test_baseline_score = self._baseline_score
+            self._val_baseline_score = self._baseline_score
             print(f"[Baseline] using precomputed score={self._baseline_score:.2f}")
             return
+        # test_set baseline（仅报告，不用于决策）
         try:
-            result = self.eval_fn(self.target, self.test_set)
+            result = self.test_eval_fn(self.target, self.test_set)
             score = result["score"]
-            self._baseline_score = score * 100 if score <= 1 else score
-            self._current_score = self._baseline_score
+            self._test_baseline_score = score * 100 if score <= 1 else score
             print(
-                f"[Baseline] test_set ({len(self.test_set)} samples) score={self._baseline_score:.2f}"
+                f"[Baseline] test_set ({len(self.test_set)} samples) score={self._test_baseline_score:.2f}"
             )
         except Exception as e:
-            log.error(f"[Baseline] failed: {e}")
-            self._baseline_score = 0.0
-            self._current_score = 0.0
+            log.error(f"[Baseline] test_set failed: {e}")
+            self._test_baseline_score = 0.0
+        # val_set baseline（用于 commit 决策）
+        if self.val_set:
+            try:
+                val_result = self.eval_fn(self.target, self.val_set)
+                vs = val_result["score"]
+                self._val_baseline_score = vs * 100 if vs <= 1 else vs
+                print(
+                    f"[Baseline] val_set ({len(self.val_set)} samples) score={self._val_baseline_score:.2f}"
+                )
+            except Exception as e:
+                log.error(f"[Baseline] val_set failed: {e}")
+                self._val_baseline_score = 0.0
+            self._baseline_score = self._val_baseline_score
+        else:
+            self._val_baseline_score = self._test_baseline_score
+            self._baseline_score = self._test_baseline_score
+        self._current_score = self._baseline_score
 
     def _final_eval_top_candidates(self, trigger: str = "finish") -> dict | None:
         """用 test_set 对 top-K 候选做 full eval，commit 最优的那个。
@@ -414,6 +500,8 @@ class UnifiedOptimizerAgent:
                 self._best_score = best_score
                 self._current_score = best_score
                 self._accepted_patches += 1
+                self._source_version += 1
+                self._eval_result_cache.clear()
                 self._push_history(
                     {
                         "action": "final_eval_commit",
@@ -446,17 +534,50 @@ class UnifiedOptimizerAgent:
         print(
             f"\n[FinalEval] Evaluating top-{len(self._top_candidates)} candidates on test_set ({len(self.test_set)} samples)..."
         )
-        best_label, best_score = None, self._baseline_score
+        # 并行评估所有候选（各候选独立沙盒，互不干扰）
+        valid_cands = []
         for cand in self._top_candidates:
-            label = cand["label"]
-            candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+            candidate_dir = os.path.join(self.sandbox._candidates_dir, cand["label"])
             if not os.path.isdir(candidate_dir):
-                print(f"  [FinalEval] {label}: candidate_dir missing, skip")
+                print(f"  [FinalEval] {cand['label']}: candidate_dir missing, skip")
                 continue
+            valid_cands.append((cand, candidate_dir))
+
+        best_label, best_score = None, self._test_baseline_score
+        if len(valid_cands) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _eval_one(item):
+                cand, cand_dir = item
+                result = self.sandbox.eval_in_sandbox(
+                    cand_dir,
+                    self.target_factory,
+                    self.test_eval_fn,
+                    self.test_set,
+                    len(self.test_set),
+                    seed=42,
+                    inline=True,
+                )
+                score = result.get("score", 0)
+                return cand, score * 100 if score <= 1 else score
+
+            with ThreadPoolExecutor(max_workers=len(valid_cands)) as pool:
+                futures = {pool.submit(_eval_one, item): item for item in valid_cands}
+                for fut in as_completed(futures):
+                    cand, final_score = fut.result()
+                    print(
+                        f"  [FinalEval] {cand['label']}: test_score={final_score:.2f} "
+                        f"(train_score={cand['score']:.2f})"
+                    )
+                    if final_score > best_score:
+                        best_score = final_score
+                        best_label = cand["label"]
+        elif valid_cands:
+            cand, cand_dir = valid_cands[0]
             result = self.sandbox.eval_in_sandbox(
-                candidate_dir,
+                cand_dir,
                 self.target_factory,
-                self.eval_fn,
+                self.test_eval_fn,
                 self.test_set,
                 len(self.test_set),
                 seed=42,
@@ -464,11 +585,12 @@ class UnifiedOptimizerAgent:
             score = result.get("score", 0)
             final_score = score * 100 if score <= 1 else score
             print(
-                f"  [FinalEval] {label}: test_score={final_score:.2f} (train_score={cand['score']:.2f})"
+                f"  [FinalEval] {cand['label']}: test_score={final_score:.2f} "
+                f"(train_score={cand['score']:.2f})"
             )
             if final_score > best_score:
                 best_score = final_score
-                best_label = label
+                best_label = cand["label"]
         if best_label:
             print(
                 f"  [FinalEval] Best: {best_label} score={best_score:.2f}, committing..."
@@ -480,6 +602,8 @@ class UnifiedOptimizerAgent:
             self._best_score = best_score
             self._current_score = best_score
             self._accepted_patches += 1
+            self._source_version += 1
+            self._eval_result_cache.clear()
             self._push_history(
                 {
                     "action": "final_eval_commit",
@@ -559,6 +683,7 @@ class UnifiedOptimizerAgent:
         project_root: str,
         dataset_pickle_path: str,
         train_pool_pickle_path: str | None,
+        val_set_pickle_path: str | None = None,
         test_set_pickle_path: str | None,
         question: str,
         ml1_cfg: dict,
@@ -584,12 +709,12 @@ class UnifiedOptimizerAgent:
                 max_steps=ml1_cfg.get("max_steps", 8),
                 n_samples=ml1_cfg.get("n_samples", 10),
                 max_llm_calls=ml1_cfg.get("max_llm_calls", 999999),
-                max_evals=ml1_cfg.get("max_evals", 4),
                 max_no_improve_steps=ml1_cfg.get("max_no_improve_steps", 3),
                 model=self.model,
                 isolate_source=True,
                 random_seed=run_seed,
                 train_pool_pickle_path=train_pool_pickle_path,
+                val_set_pickle_path=val_set_pickle_path,
                 test_set_pickle_path=test_set_pickle_path,
                 train_sample_size=train_sample_size,
                 top_k=top_k,
@@ -730,10 +855,11 @@ class UnifiedOptimizerAgent:
             wall_timeout_sec=wall_timeout,
             no_tool_call_prompt=(
                 "You must continue the optimization loop by calling tools. "
-                "After analyze, you should: (1) checkpoint_candidate with the patch ops, "
-                "(2) for deterministic fixes: accept_candidate(skip_eval=true, skip_eval_reason=...), "
-                "for behavioral changes: eval_candidate then accept_candidate if improved, "
-                "or try a different patch. "
+                "After analyze, you should: (1) checkpoint 2-3 distinct behavioral candidates with checkpoint_candidate, "
+                "(2) by default call eval_candidate on one of them and the system will auto-batch the rest from the same analysis round, "
+                "(3) for deterministic fixes: accept_candidate(skip_eval=true, skip_eval_reason=...), "
+                "otherwise accept_candidate if the batched eval improved. "
+                "If you only have one credible candidate, eval_candidate still works. "
                 "REMINDER: You MUST call spawn_sublayer before finish."
             ),
             compact_fn=self._compact_messages,
@@ -809,7 +935,7 @@ class UnifiedOptimizerAgent:
         if final_eval and final_eval.get("test_score") is not None:
             committed_score = final_eval["test_score"]
         else:
-            committed_score = self._baseline_score
+            committed_score = self._test_baseline_score
 
         # L2 spawn 的 mini-L1 已含 test eval，直接复用 child_score
         if self._spawn_noa_modified:
@@ -821,7 +947,7 @@ class UnifiedOptimizerAgent:
 
         return {
             "final_score": committed_score,
-            "baseline_score": self._baseline_score,
+            "baseline_score": self._test_baseline_score,
             "iterations": self._step_count,
             "accepted": self._accepted_patches,
             "history": self._history,
@@ -1063,6 +1189,21 @@ class UnifiedOptimizerAgent:
         )
         tools.append(
             _tool(
+                f"{p}__eval_candidates_batch",
+                "Evaluate multiple candidates IN PARALLEL. Much faster than calling eval_candidate one by one. "
+                "Use this after checkpoint'ing 2+ candidates to evaluate them all at once.",
+                {
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Labels of candidates to evaluate (must be checkpoint'd first)",
+                    },
+                },
+                required=["labels"],
+            )
+        )
+        tools.append(
+            _tool(
                 f"{p}__fix_patch",
                 "Fix a broken candidate: replace its patch ops with corrected ones, re-validate (including syntax check), and re-checkpoint. Use after eval_candidate returns score=0 with subprocess errors.",
                 {
@@ -1128,6 +1269,48 @@ class UnifiedOptimizerAgent:
                 required=["label", "source_labels"],
             )
         )
+
+        # E3. 拓扑操作（仅 L1）
+        if self.layer_context.level <= 1:
+            tools.append(
+                _tool(
+                    f"{p}__get_pipeline_config",
+                    "View current pipeline topology: component order, enabled/disabled status, and data dependencies.",
+                    {},
+                )
+            )
+            tools.append(
+                _tool(
+                    f"{p}__toggle_component",
+                    "Enable or disable a pipeline component. Rejects if disabling breaks data flow unless force=true.",
+                    {
+                        "name": {"type": "string", "description": "Component name"},
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "True to enable, False to disable",
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Force toggle even if it breaks dependency constraints (default: false)",
+                        },
+                    },
+                    required=["name", "enabled"],
+                )
+            )
+            tools.append(
+                _tool(
+                    f"{p}__reorder_pipeline",
+                    "Reorder pipeline components. Validates dependency constraints — rejects invalid orderings.",
+                    {
+                        "order": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "New component order (all component names)",
+                        },
+                    },
+                    required=["order"],
+                )
+            )
 
         # F. 状态与控制
         tools.append(_tool("get_state", "Get current optimization state summary.", {}))
@@ -1211,6 +1394,7 @@ class UnifiedOptimizerAgent:
             "run_eval",
             "analyze",
             "eval_candidate",
+            "eval_candidates_batch",
         }
     )
 
@@ -1388,24 +1572,118 @@ class UnifiedOptimizerAgent:
         return {"count": len(artifacts), "artifacts": artifacts}
 
     def _commit_best_before_observe(self):
-        """新一轮 observe 前，commit 当前 top-K 最优候选到 source_dir 作为新 base。"""
+        """新一轮 observe 前，用 val_set eval top-K 最优候选，提升则 commit 为新 base。"""
         if self._episode_counter == 0 or not self._top_candidates:
             return
         best_cand = max(self._top_candidates, key=lambda c: c["score"])
-        if best_cand["score"] <= self._baseline_score:
-            return
         best_label = best_cand["label"]
-        self.sandbox.accept_candidate(best_label)
-        self.sys_desc.source_files = collect_sources(self.source_dir)
-        self._refresh_file_map()
-        self.target = self.target_factory(self.source_dir)
-        self._baseline_score = best_cand["score"]
-        self._top_candidates.clear()
-        self._candidate_scores.clear()
-        print(
-            f"\n[Observe] Committed best candidate '{best_label}' "
-            f"(score={best_cand['score']:.2f}) as new base for next round"
-        )
+
+        # 有 val_set 时，在候选沙盒中 eval 决定是否 commit
+        if self.val_set:
+            # 直接从候选目录评估，不先 accept（避免污染 accepted snapshot）
+            candidate_dir = os.path.join(self.sandbox._candidates_dir, best_label)
+            if not os.path.isdir(candidate_dir):
+                self._top_candidates.clear()
+                self._candidate_scores.clear()
+                return
+            tmp_target = self.target_factory(candidate_dir)
+            try:
+                val_result = self.eval_fn(tmp_target, self.val_set)
+                val_score = val_result["score"]
+                val_score = val_score * 100 if val_score <= 1 else val_score
+            except Exception as e:
+                log.warning("[Observe] val_set eval failed: %s", e)
+                val_score = 0.0
+            print(
+                f"\n[Observe] Val eval candidate '{best_label}': "
+                f"val_score={val_score:.2f}, baseline={self._baseline_score:.2f}"
+            )
+            if val_score > self._baseline_score:
+                # 验证通过，正式 accept（会刷新 accepted snapshot）
+                self.sandbox.accept_candidate(best_label)
+                self.sys_desc.source_files = collect_sources(self.source_dir)
+                self._refresh_file_map()
+                self.target = self.target_factory(self.source_dir)
+                self._baseline_score = val_score
+                self._top_candidates.clear()
+                self._candidate_scores.clear()
+                self._source_version += 1
+                self._eval_result_cache.clear()
+                print(
+                    f"[Observe] Committed '{best_label}' "
+                    f"(val_score={val_score:.2f}) as new base"
+                )
+            else:
+                # val 没提升，不 accept，accepted snapshot 不受影响
+                self._top_candidates.clear()
+                self._candidate_scores.clear()
+                print(
+                    f"[Observe] Rejected '{best_label}' "
+                    f"(val_score={val_score:.2f} <= baseline={self._baseline_score:.2f})"
+                )
+        else:
+            # 无 val_set，退回 train score 决策
+            if best_cand["score"] <= self._baseline_score:
+                return
+            self.sandbox.accept_candidate(best_label)
+            self.sys_desc.source_files = collect_sources(self.source_dir)
+            self._refresh_file_map()
+            self.target = self.target_factory(self.source_dir)
+            self._baseline_score = best_cand["score"]
+            self._source_version += 1
+            self._eval_result_cache.clear()
+            self._top_candidates.clear()
+            self._candidate_scores.clear()
+            print(
+                f"\n[Observe] Committed '{best_label}' "
+                f"(train_score={best_cand['score']:.2f}) as new base"
+            )
+
+    def _run_fresh_observe_inline(self, samples: list) -> list:
+        """对缺失样本直接跑 target，收集轨迹（不走 agentic observer）。"""
+        from noa.core.protocol import Trajectory
+
+        trajs = []
+        total = len(samples)
+        print(f"[FreshObserve:inline] Running {total} samples...")
+        for i, sample in enumerate(samples):
+            try:
+                kwargs = {"question": sample.question}
+                if getattr(sample, "context", ""):
+                    kwargs["context"] = sample.context
+                result = self.target(**kwargs)
+                score = self.score_fn(result.answer, sample.answer)
+                trajs.append(
+                    Trajectory(
+                        question=sample.question,
+                        ground_truth=sample.answer,
+                        prediction=result.answer,
+                        f1=float(score),
+                        intermediate=result.intermediate
+                        if isinstance(result.intermediate, dict)
+                        else {},
+                        trace_source="cache_topup",
+                    )
+                )
+            except Exception as e:
+                log.warning(
+                    "[observe_cache] fresh run failed for %s: %s",
+                    getattr(sample, "question", "?")[:50],
+                    e,
+                )
+                trajs.append(
+                    Trajectory(
+                        question=getattr(sample, "question", ""),
+                        ground_truth=getattr(sample, "answer", ""),
+                        prediction="",
+                        f1=0.0,
+                        intermediate={},
+                        trace_source="cache_topup_error",
+                    )
+                )
+            if (i + 1) % 5 == 0 or i + 1 == total:
+                print(f"[FreshObserve:inline] {i+1}/{total} done")
+        return trajs
 
     def _tool_run_observe(self, args: dict) -> dict:
         import random as _random
@@ -1429,27 +1707,84 @@ class UnifiedOptimizerAgent:
         n_samples = min(self.train_sample_size, len(self.train_pool))
         self._current_train_samples = rng.sample(self.train_pool, n_samples)
         seed = obs_seed
-        trajectories = observe_agentic(
-            self.target,
-            self._current_train_samples,
-            n_samples=n_samples,
-            seed=seed,
-            score_fn=self.score_fn,
-            model=self.model,
-            source_dir=self.source_dir,
-            search_roots=self.observer_search_roots,
-            max_tool_calls=8,
-            layer_context=self.layer_context.to_prompt_context()
-            if self.layer_context
-            else "",
-            layer_context_obj=self.layer_context,
-            required_intermediate_keys=(
-                None
-                if self.layer_context and self.layer_context.level >= 2
-                else getattr(self.sys_desc, "component_names", None)
-            ),
-        )
-        self._trajectories = trajectories or []
+
+        # --- trajectory 缓存: source 未变时复用已有轨迹 ---
+        if (
+            self._source_version == self._traj_cache_source_version
+            and self._trajectory_cache
+        ):
+            cached_trajs = []
+            missing_samples = []
+            for sample in self._current_train_samples:
+                q = getattr(sample, "question", "")
+                if q and q in self._trajectory_cache:
+                    cached_trajs.append(self._trajectory_cache[q])
+                else:
+                    missing_samples.append(sample)
+
+            if not missing_samples:
+                # 全量缓存命中 — 跳过 observe
+                log.info(
+                    "[observe_cache] FULL HIT: %d cached trajectories",
+                    len(cached_trajs),
+                )
+                self._trajectories = cached_trajs
+            elif len(missing_samples) < len(self._current_train_samples):
+                # 部分命中 — 仅对缺失样本跑 fresh observe
+                log.info(
+                    "[observe_cache] PARTIAL HIT: %d cached, %d missing",
+                    len(cached_trajs),
+                    len(missing_samples),
+                )
+                fresh_trajs = self._run_fresh_observe_inline(missing_samples)
+                for t in fresh_trajs:
+                    q = getattr(t, "question", "")
+                    if q:
+                        self._trajectory_cache[q] = t
+                self._trajectories = cached_trajs + fresh_trajs
+            else:
+                self._trajectories = None  # 全部未命中，走正常流程
+        else:
+            # source 已变，清空缓存
+            if self._source_version != self._traj_cache_source_version:
+                self._trajectory_cache.clear()
+                self._traj_cache_source_version = self._source_version
+            self._trajectories = None  # 走正常流程
+
+        if self._trajectories is None:
+            # persist_root: 写到 observer_search_roots[0] 下，保证 run 隔离
+            _persist_root = (
+                self.observer_search_roots[0] if self.observer_search_roots else None
+            )
+            trajectories = observe_agentic(
+                self.target,
+                self._current_train_samples,
+                n_samples=n_samples,
+                seed=seed,
+                score_fn=self.score_fn,
+                model=self.model,
+                source_dir=self.source_dir,
+                search_roots=self.observer_search_roots,
+                persist_root=_persist_root,
+                max_tool_calls=8,
+                layer_context=self.layer_context.to_prompt_context()
+                if self.layer_context
+                else "",
+                layer_context_obj=self.layer_context,
+                required_intermediate_keys=(
+                    None
+                    if self.layer_context and self.layer_context.level >= 2
+                    else getattr(self.sys_desc, "component_names", None)
+                ),
+            )
+            self._trajectories = trajectories or []
+            # 更新 trajectory 缓存
+            self._trajectory_cache.clear()
+            self._traj_cache_source_version = self._source_version
+            for t in self._trajectories:
+                q = getattr(t, "question", "")
+                if q:
+                    self._trajectory_cache[q] = t
         # 计算当轮 train 样本上的 baseline 分数（未修改的原始 pipeline）
         try:
             base_result = self.eval_fn(self.target, self._current_train_samples)
@@ -1465,6 +1800,7 @@ class UnifiedOptimizerAgent:
             log.warning(f"[Observe] failed to compute train baseline: {e}")
             self._current_train_baseline = 0.0
         # 保存到 trajectory store
+        trajectories = self._trajectories
         self._episode_counter += 1
         ep_id = f"ep_{self._episode_counter}"
         if trajectories:
@@ -1488,6 +1824,7 @@ class UnifiedOptimizerAgent:
                 "episode_id": ep_id,
                 "count": len(trajectories),
                 "mean_score": round(mean, 2),
+                "__force_compact__": True,
             }
         self._push_history(
             {
@@ -1498,7 +1835,12 @@ class UnifiedOptimizerAgent:
                 "mean_f1": 0,
             }
         )
-        return {"episode_id": ep_id, "count": 0, "mean_score": 0}
+        return {
+            "episode_id": ep_id,
+            "count": 0,
+            "mean_score": 0,
+            "__force_compact__": True,
+        }
 
     def _observe_from_parent_history(self) -> dict:
         """L2+: 返回摘要统计 + 指引 LLM 用 read_source_file 读完整历史。
@@ -1676,24 +2018,70 @@ class UnifiedOptimizerAgent:
             return {"ok": False, "case_id": case_id, "error": str(e)[:500]}
 
     def _tool_analyze(self, args: dict) -> dict:
-        if not self._trajectories:
-            return {"error": "No trajectories. Run observe first."}
-        from noa.stages.analyzer import analyze_incremental
+        from noa.stages.analyzer import analyze_history_records, analyze_incremental
 
         top_n = int(args.get("top_n", 10))
-        diagnosis, _ = analyze_incremental(
-            self.sys_desc,
-            self._trajectories,
-            model=self.model,
-            failure_threshold=None,
-            past_attempts="",
-            pool=None,
-            top_n=top_n,
-            probe=self.component_probe,
-            max_tool_calls=6,
-            layer_context=self.layer_context.to_prompt_context(),
-        )
+        layer_context_text = self.layer_context.to_prompt_context()
+
+        if self._trajectories:
+            diagnosis, _ = analyze_incremental(
+                self.sys_desc,
+                self._trajectories,
+                model=self.model,
+                failure_threshold=None,
+                past_attempts="",
+                pool=None,
+                top_n=top_n,
+                probe=self.component_probe,
+                max_tool_calls=6,
+                layer_context=layer_context_text,
+            )
+        elif self.layer_context and self.layer_context.level >= 2:
+            own_meta_history = [
+                h
+                for h in self._history
+                if h.get("action")
+                in (
+                    "observe",
+                    "analyze",
+                    "checkpoint_candidate",
+                    "eval_candidate",
+                    "accept_candidate",
+                    "reject_candidate",
+                    "eval",
+                    "spawn_sublayer",
+                    "final_eval_commit",
+                    "final_eval_skipped",
+                )
+            ]
+            if own_meta_history:
+                diagnosis = analyze_history_records(
+                    self.sys_desc,
+                    own_meta_history,
+                    model=self.model,
+                    top_n=top_n,
+                    layer_context=layer_context_text,
+                    parent_summary=self.layer_context.parent_summary,
+                    history_source="own_eval_history",
+                )
+            elif self.layer_context.parent_history:
+                diagnosis = analyze_history_records(
+                    self.sys_desc,
+                    self.layer_context.parent_history,
+                    model=self.model,
+                    top_n=top_n,
+                    layer_context=layer_context_text,
+                    parent_summary=self.layer_context.parent_summary,
+                    history_source="parent_history",
+                )
+            else:
+                return {"error": "No trajectories or meta-history. Run observe first."}
+        else:
+            return {"error": "No trajectories. Run observe first."}
+
         self._diagnosis = diagnosis
+        self._analysis_round += 1
+        self._active_analysis_round = self._analysis_round
         self.budget.llm_calls_used += 1
         print(f"\n[Analyze] Summary: {diagnosis.summary[:200]}")
         for i, pat in enumerate(diagnosis.failure_patterns[:5]):
@@ -1728,6 +2116,12 @@ class UnifiedOptimizerAgent:
             "summary": diagnosis.summary[:1000],
             "top_patterns": slim_patterns,
             "total_pattern_count": len(diagnosis.failure_patterns),
+            "analysis_round": self._active_analysis_round,
+            "default_batch_size": self._default_candidate_batch_size,
+            "default_next_action": (
+                f"Checkpoint 2-{self._default_candidate_batch_size} distinct candidates for analysis_round "
+                f"{self._active_analysis_round}, then call eval_candidate on one label to auto-batch them."
+            ),
             "detail_file": detail_file,
             "hint": f"read_source_file(path='{detail_file}') for all patterns",
         }
@@ -2000,12 +2394,19 @@ class UnifiedOptimizerAgent:
             )
             return {"ok": False, "errors": enriched}
         print(f"  [Checkpoint] OK dir={candidate_dir}")
+        ops_hash = self._compute_ops_hash(ops_summary)
+        self._candidate_checkpoint_counter += 1
+        self._candidate_scores.pop(args["label"], None)
         self._candidate_meta[args["label"]] = {
             "label": args["label"],
             "rationale": args.get("rationale", "")[:500],
             "ops": ops_summary,
+            "ops_hash": ops_hash,
             "detail_file": detail_file,
             "step": self._step_count,
+            "analysis_round": self._active_analysis_round,
+            "checkpoint_index": self._candidate_checkpoint_counter,
+            "eval_status": "pending",
         }
         self._push_history(
             {
@@ -2015,6 +2416,7 @@ class UnifiedOptimizerAgent:
                 "ok": True,
                 "rationale": args.get("rationale", "")[:300],
                 "ops": ops_summary,
+                "analysis_round": self._active_analysis_round,
                 "detail_file": detail_file,
             }
         )
@@ -2038,6 +2440,26 @@ class UnifiedOptimizerAgent:
 
     def _tool_eval_candidate(self, args: dict) -> dict:
         label = args["label"]
+        batch_labels = self._auto_batch_labels_for(label)
+        if len(batch_labels) >= _MIN_AUTO_BATCH_SIZE:
+            batch_result = self._tool_eval_candidates_batch(
+                {"labels": batch_labels, "requested_label": label, "auto_batch": True}
+            )
+            requested_result = batch_result.get("results", {}).get(label, {})
+            return {
+                "ok": True,
+                "mode": "auto_batch",
+                "requested_label": label,
+                "batch_labels": batch_labels,
+                "candidate_label": label,
+                "candidate_score": requested_result.get("candidate_score", 0),
+                "baseline_score": requested_result.get("baseline_score", 0),
+                "next_action": requested_result.get("next_action", ""),
+                "error": requested_result.get("error"),
+                "results": batch_result.get("results", {}),
+                "evaluated": batch_result.get("evaluated", 0),
+                "cached": batch_result.get("cached", 0),
+            }
         # 时间检查: 拒绝启动必定超时的评估
         time_err = self._check_time_for_eval("eval_candidate")
         if time_err:
@@ -2045,6 +2467,39 @@ class UnifiedOptimizerAgent:
         candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
         if not os.path.isdir(candidate_dir):
             return {"error": f"Candidate not found: {label}"}
+
+        # eval 缓存: 同一 patch ops 不重复评估
+        candidate_meta = self._candidate_meta.get(label, {})
+        ops_hash = candidate_meta.get("ops_hash", "")
+        if ops_hash and ops_hash in self._eval_result_cache:
+            cached = self._eval_result_cache[ops_hash]
+            log.info(
+                "[eval_cache] HIT ops_hash=%s label=%s cached_score=%.2f",
+                ops_hash,
+                label,
+                cached.get("candidate_score", 0),
+            )
+            self._candidate_scores[label] = cached.get("candidate_score", 0)
+            self._mark_candidate_eval_status(
+                label, "evaluated", score=cached.get("candidate_score", 0)
+            )
+            self._push_history(
+                {
+                    "action": "eval_candidate",
+                    "step": self._step_count,
+                    "label": label,
+                    "mode": "cached",
+                    "rationale": candidate_meta.get("rationale", ""),
+                    "ops": candidate_meta.get("ops", []),
+                    "before_score": cached.get("baseline_score", 0),
+                    "after_score": cached.get("candidate_score", 0),
+                    "accepted": cached.get("candidate_score", 0)
+                    > cached.get("baseline_score", 0),
+                    "cached": True,
+                }
+            )
+            return {**cached, "cached": True, "ok": True}
+
         mode = args.get("mode", "full")
         # cheap 和 full 都在当轮 train 样本上评估
         val_data = (
@@ -2069,6 +2524,7 @@ class UnifiedOptimizerAgent:
         # 归一化到 0~100，与 run_eval 保持一致
         normalized_score = score * 100 if score <= 1 else score
         self._candidate_scores[label] = normalized_score
+        self._mark_candidate_eval_status(label, "evaluated", score=normalized_score)
         # 注意: 不在 eval 阶段加入 top_candidates，只在 accept_candidate 时加入
         # L1: 用当轮 train 样本的 baseline 比较；L2+: 用 test_set baseline（L2 不走 observe 抽样）
         train_baseline = (
@@ -2154,6 +2610,7 @@ class UnifiedOptimizerAgent:
                 f"Analyze why and try a different patch."
             )
         slim_result = {
+            "ok": result.get("ok", eval_error is None),
             "candidate_label": label,
             "candidate_score": normalized_score,
             "baseline_score": train_baseline,
@@ -2167,7 +2624,160 @@ class UnifiedOptimizerAgent:
             slim_result["detail_file"] = detail_file
         if mini_l1_file:
             slim_result["mini_l1_detail_file"] = mini_l1_file
+        # 写入 eval 缓存
+        if ops_hash and result.get("ok"):
+            self._eval_result_cache[ops_hash] = {
+                "ok": True,
+                "candidate_label": label,
+                "candidate_score": normalized_score,
+                "baseline_score": train_baseline,
+                "next_action": next_action,
+                "error": eval_error,
+            }
         return slim_result
+
+    def _tool_eval_candidates_batch(self, args: dict) -> dict:
+        """并行评估多个候选，返回各候选结果。"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        labels = list(dict.fromkeys(args.get("labels", [])))
+        requested_label = args.get("requested_label", "")
+        auto_batch = bool(args.get("auto_batch", False))
+        if not labels:
+            return {"error": "No labels provided"}
+
+        time_err = self._check_time_for_eval("eval_candidates_batch")
+        if time_err:
+            return {"error": time_err, "error_type": "insufficient_time"}
+
+        # 检查候选是否存在 + 过滤缓存命中
+        to_eval = []
+        results = {}
+        for label in labels:
+            candidate_meta = self._candidate_meta.get(label, {})
+            ops_hash = candidate_meta.get("ops_hash", "")
+            if ops_hash and ops_hash in self._eval_result_cache:
+                cached = self._eval_result_cache[ops_hash]
+                self._candidate_scores[label] = cached.get("candidate_score", 0)
+                self._mark_candidate_eval_status(
+                    label, "evaluated", score=cached.get("candidate_score", 0)
+                )
+                results[label] = {**cached, "cached": True, "ok": True}
+                log.info("[batch_eval_cache] HIT %s hash=%s", label, ops_hash)
+                continue
+            candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+            if not os.path.isdir(candidate_dir):
+                results[label] = {"error": f"Candidate not found: {label}"}
+                continue
+            to_eval.append((label, candidate_dir))
+
+        if not to_eval:
+            return {
+                "ok": True,
+                "mode": "auto_batch" if auto_batch else "batch",
+                "requested_label": requested_label,
+                "results": results,
+                "evaluated": 0,
+                "cached": len(results),
+            }
+
+        val_data = (
+            self._current_train_samples
+            if self._current_train_samples
+            else self.train_pool
+        )
+        eval_n = len(val_data)
+        timeout_sec = self._nested_eval_timeout()
+
+        def _eval_one(item):
+            label, cand_dir = item
+            return label, self.sandbox.eval_in_sandbox(
+                cand_dir,
+                self.target_factory,
+                self.eval_fn,
+                val_data,
+                eval_n,
+                seed=42,
+                timeout_sec=timeout_sec,
+                inline=True,
+            )
+
+        # 限制批量候选评估并发，避免 mini-L1 的内部 worker 并发相乘。
+        per_eval_limit = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "25")))
+        global_eval_limit = max(
+            per_eval_limit,
+            int(os.getenv("NOA_GLOBAL_EVAL_MAX_WORKERS", "50")),
+        )
+        batch_parallelism = max(1, global_eval_limit // per_eval_limit)
+
+        # 并行评估（inline=True 避免线程+fork 死锁）
+        with ThreadPoolExecutor(
+            max_workers=min(len(to_eval), 4, batch_parallelism)
+        ) as pool:
+            futures = {pool.submit(_eval_one, item): item for item in to_eval}
+            for fut in as_completed(futures):
+                label, result = fut.result()
+                self.budget.evals_used += 1
+                score = result.get("score", 0)
+                normalized_score = score * 100 if score <= 1 else score
+                self._candidate_scores[label] = normalized_score
+                self._mark_candidate_eval_status(
+                    label, "evaluated", score=normalized_score
+                )
+
+                train_baseline = (
+                    self._current_train_baseline
+                    if self.layer_context.level <= 1
+                    and self._current_train_baseline > 0
+                    else self._baseline_score
+                )
+                candidate_meta = self._candidate_meta.get(label, {})
+                ops_hash = candidate_meta.get("ops_hash", "")
+                eval_error = result.get("error")
+
+                self._push_history(
+                    {
+                        "action": "eval_candidate",
+                        "step": self._step_count,
+                        "label": label,
+                        "mode": "batch",
+                        "rationale": candidate_meta.get("rationale", ""),
+                        "ops": candidate_meta.get("ops", []),
+                        "before_score": round(train_baseline, 2),
+                        "after_score": round(normalized_score, 2),
+                        "accepted": normalized_score > train_baseline,
+                        "error": eval_error,
+                    }
+                )
+
+                slim = {
+                    "ok": result.get("ok", eval_error is None),
+                    "candidate_label": label,
+                    "candidate_score": normalized_score,
+                    "baseline_score": train_baseline,
+                    "error": eval_error,
+                }
+                if normalized_score > train_baseline:
+                    slim["next_action"] = f"accept_candidate(label='{label}')"
+                results[label] = slim
+
+                # 写入 eval 缓存
+                if ops_hash and result.get("ok"):
+                    self._eval_result_cache[ops_hash] = slim
+
+                print(
+                    f"[BatchEval] {label}: score={normalized_score:.2f} "
+                    f"(baseline={train_baseline:.2f})"
+                )
+
+        return {
+            "ok": True,
+            "mode": "auto_batch" if auto_batch else "batch",
+            "requested_label": requested_label,
+            "results": results,
+            "evaluated": len(to_eval),
+            "cached": len(labels) - len(to_eval),
+        }
 
     def _tool_accept_candidate(self, args: dict) -> dict:
         """接受候选 — 加入 top-K 池，不直接 commit（final eval 时再 commit 最优的）。"""
@@ -2197,6 +2807,9 @@ class UnifiedOptimizerAgent:
             )
             virtual_score = train_baseline + 0.01
             self._candidate_scores[label] = virtual_score
+            self._mark_candidate_eval_status(
+                label, "accepted_skip_eval", score=virtual_score
+            )
             self._update_top_candidates(label, virtual_score)
             candidate_meta = self._candidate_meta.get(label, {})
             print(
@@ -2243,6 +2856,7 @@ class UnifiedOptimizerAgent:
                 f"  [AcceptCandidate] REJECTED: candidate {cand_score:.2f} <= train_baseline {train_baseline:.2f}"
             )
             self.budget.no_improve_count += 1
+            self._mark_candidate_eval_status(label, "rejected", score=cand_score)
             candidate_meta = self._candidate_meta.get(label, {})
             self._push_history(
                 {
@@ -2259,6 +2873,7 @@ class UnifiedOptimizerAgent:
                 "error": f"Candidate score {cand_score:.2f} not better than train_baseline {train_baseline:.2f}. Not added to top-{self.top_k} pool.",
             }
         self._update_top_candidates(label, cand_score)
+        self._mark_candidate_eval_status(label, "accepted", score=cand_score)
         self.budget.no_improve_count = 0
         if cand_score > self._best_score:
             self._best_score = cand_score
@@ -2317,10 +2932,15 @@ class UnifiedOptimizerAgent:
         if not dpp:
             dpp = serialize_dataset(self.dataset, cache_dir=cache_dir)
 
-        # 序列化 train_pool / test_set 供 mini-L1 subprocess 使用
+        # 序列化 train_pool / val_set / test_set 供 mini-L1 subprocess 使用
         train_pool_pp = (
             serialize_dataset(self.train_pool, cache_dir=cache_dir)
             if self.train_pool
+            else None
+        )
+        val_set_pp = (
+            serialize_dataset(self.val_set, cache_dir=cache_dir)
+            if self.val_set
             else None
         )
         test_set_pp = (
@@ -2341,6 +2961,7 @@ class UnifiedOptimizerAgent:
                     project_root=project_root,
                     dataset_pickle_path=dpp,
                     train_pool_pickle_path=train_pool_pp,
+                    val_set_pickle_path=val_set_pp,
                     test_set_pickle_path=test_set_pp,
                     question=question,
                     ml1_cfg=ml1,
@@ -2471,7 +3092,6 @@ class UnifiedOptimizerAgent:
                     model=self.model,
                     score_fn=child_score_fn,
                     max_llm_calls=l2_cfg.get("max_llm_calls", 999999),
-                    max_evals=l2_cfg.get("max_evals", 8),
                     max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 4),
                     layer_context=child_layer_context,
                     observer_search_roots=[noa_dir],
@@ -2525,7 +3145,128 @@ class UnifiedOptimizerAgent:
             args["start_component"], args.get("inputs", {})
         )
 
+    # --- 拓扑操作工具 ---
+
+    def _load_pipeline_config(self) -> tuple[dict | None, str]:
+        """加载 pipeline_config.json，返回 (config_dict, config_path)。"""
+        config_path = os.path.join(self.source_dir, "pipeline_config.json")
+        if not os.path.exists(config_path):
+            return None, config_path
+        with open(config_path) as f:
+            return json.load(f), config_path
+
+    def _save_pipeline_config(self, config: dict, config_path: str):
+        """保存 pipeline_config.json 并重建 target，同步刷新 sys_desc 拓扑字段。"""
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        self.sys_desc.source_files = collect_sources(self.source_dir)
+        # 同步刷新 component_names 和 workflow_summary
+        enabled = [e for e in config.get("pipeline", []) if e.get("enabled", True)]
+        self.sys_desc.component_names = [e["name"] for e in enabled]
+        self.sys_desc.workflow_summary = " → ".join(self.sys_desc.component_names)
+        self._refresh_file_map()
+        self.target = self.target_factory(self.source_dir)
+        # 拓扑编辑直接修改了 source_dir，刷新 checkpoint 基线
+        # 否则后续 checkpoint_candidate 仍基于旧快照，拓扑变更丢失
+        self.sandbox.save_accepted_snapshot()
+        self._source_version += 1
+        self._eval_result_cache.clear()
+        if self.component_probe:
+            self.component_probe = ComponentProbe(self.target, self.sys_desc)
+
+    def _validate_topology(
+        self, pipeline_def: list, pipeline_inputs: set[str]
+    ) -> str | None:
+        """返回 None 表示合法，否则返回错误描述。"""
+        available = set(pipeline_inputs)
+        for entry in pipeline_def:
+            if not entry.get("enabled", True):
+                continue
+            missing = set(entry.get("requires", [])) - available
+            if missing:
+                return f"Component '{entry['name']}' requires {missing} but only {available} available at this point"
+            available.update(entry.get("produces", []))
+        return None
+
+    def _tool_get_pipeline_config(self, args: dict) -> dict:
+        cfg, config_path = self._load_pipeline_config()
+        if cfg is None:
+            return {
+                "ok": False,
+                "error": f"No pipeline_config.json found at {config_path}",
+            }
+        return {
+            "ok": True,
+            "inputs": cfg.get("inputs", []),
+            "pipeline": cfg["pipeline"],
+            "component_count": len(cfg["pipeline"]),
+            "enabled_count": sum(1 for e in cfg["pipeline"] if e.get("enabled", True)),
+        }
+
+    def _tool_toggle_component(self, args: dict) -> dict:
+        name = args["name"]
+        enabled = args["enabled"]
+        force = args.get("force", False)
+        cfg, config_path = self._load_pipeline_config()
+        if cfg is None:
+            return {"ok": False, "error": "No pipeline_config.json found"}
+        entry = next((e for e in cfg["pipeline"] if e["name"] == name), None)
+        if entry is None:
+            names = [e["name"] for e in cfg["pipeline"]]
+            return {
+                "ok": False,
+                "error": f"Component '{name}' not found. Available: {names}",
+            }
+        entry["enabled"] = enabled
+        # 依赖校验：默认拒绝非法拓扑，force=true 时降级为警告
+        if not enabled:
+            err = self._validate_topology(cfg["pipeline"], set(cfg.get("inputs", [])))
+            if err and not force:
+                # 回滚
+                entry["enabled"] = True
+                return {
+                    "ok": False,
+                    "error": f"Invalid topology after disabling '{name}': {err}. Use force=true to override.",
+                }
+            if err and force:
+                self._save_pipeline_config(cfg, config_path)
+                return {
+                    "ok": True,
+                    "name": name,
+                    "enabled": enabled,
+                    "warning": f"Forced despite dependency issue: {err}",
+                }
+        self._save_pipeline_config(cfg, config_path)
+        return {"ok": True, "name": name, "enabled": enabled}
+
+    def _tool_reorder_pipeline(self, args: dict) -> dict:
+        order = args["order"]
+        cfg, config_path = self._load_pipeline_config()
+        if cfg is None:
+            return {"ok": False, "error": "No pipeline_config.json found"}
+        entry_map = {e["name"]: e for e in cfg["pipeline"]}
+        # 校验名称完整性
+        unknown = set(order) - set(entry_map)
+        if unknown:
+            return {"ok": False, "error": f"Unknown components: {unknown}"}
+        missing = set(entry_map) - set(order)
+        if missing:
+            return {"ok": False, "error": f"Missing components in order: {missing}"}
+        # 按新顺序排列
+        new_pipeline = [entry_map[n] for n in order]
+        # 依赖校验（拒绝无效拓扑）
+        err = self._validate_topology(new_pipeline, set(cfg.get("inputs", [])))
+        if err:
+            return {"ok": False, "error": f"Invalid topology: {err}"}
+        cfg["pipeline"] = new_pipeline
+        self._save_pipeline_config(cfg, config_path)
+        return {"ok": True, "new_order": order}
+
     def _tool_get_state(self) -> str:
+        current_round_pending = self._analysis_round_candidates(
+            self._active_analysis_round, only_pending=True
+        )
         recent_candidate_events = [
             h
             for h in self._history
@@ -2553,6 +3294,9 @@ class UnifiedOptimizerAgent:
                 for c in self._top_candidates
             ],
             "train_sample_size": len(self._current_train_samples),
+            "active_analysis_round": self._active_analysis_round,
+            "default_candidate_batch_size": self._default_candidate_batch_size,
+            "current_round_pending_candidates": current_round_pending,
         }
         return json.dumps(state, indent=1)
 

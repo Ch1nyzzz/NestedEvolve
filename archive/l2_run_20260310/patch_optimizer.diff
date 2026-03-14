@@ -1,0 +1,79 @@
+--- /Users/erv1n/NestedAgent/noa/stages/optimizer.py	2026-03-06 21:23:28
++++ /Users/erv1n/NestedAgent/.noa_runs/noa_unified_l2/_sandbox_candidates/combined_framework_fixes/stages/optimizer.py	2026-03-10 15:56:10
+@@ -8,7 +8,7 @@
+ import re
+
+ from utils.llm import llm_call, DEFAULT_MODEL
+-from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp
++from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile
+ from noa.diff_utils import extract_diffs, apply_diffs_in_memory
+ from noa.patch_protocol import apply_patch_ops, validate_patch_ops
+ from noa.core import prompts
+@@ -23,8 +23,52 @@
+     s = str(val).strip()
+     m = re.search(r"\d+", s)
+     return int(m.group()) if m else default
++
++
++def _read_current_workspace_files(sys_desc: SystemDescription) -> list[SourceFile]:
++    """读取当前 workspace 中的源文件状态，而非使用初始快照。
++
++    这确保 SEARCH/REPLACE 块与文件的实际当前内容匹配，避免在增量 patch 时
++    因基于过时快照生成 patch 而导致的匹配失败。
++    """
++    import os
++    from noa.stages.initiator import collect_sources
++
++    # 优先从环境变量或运行时上下文获取当前 workspace 路径
++    from noa.runtime.context import get_run_context
++    ctx = get_run_context()
++
++    if ctx and ctx.workspace_dir and os.path.isdir(ctx.workspace_dir):
++        # 在 workspace 中查找目标源码目录
++        # 通常 source_dir 是 workspace 下的相对路径
++        source_dir = sys_desc.source_dir
++        if os.path.isdir(source_dir):
++            return collect_sources(source_dir)
++
++    # 回退：使用原始 source_files，但尝试从磁盘重新读取
++    result = []
++    for sf in sys_desc.source_files:
++        current_path = os.path.join(sys_desc.source_dir, sf.path)
++        if os.path.exists(current_path):
++            try:
++                with open(current_path, encoding="utf-8") as f:
++                    result.append(SourceFile(path=sf.path, content=f.read()))
++            except Exception:
++                result.append(sf)  # 保持原样
++        else:
++            result.append(sf)
++    return result
+
+
++def _format_source_context(source_files: list[SourceFile]) -> str:
++    """将源文件列表格式化为 LLM 可读的上下文字符串。"""
++    parts = []
++    for sf in source_files:
++        lang = "json" if sf.path.endswith(".json") else "python"
++        parts.append(f"## File: {sf.path}\n```{lang}\n{sf.content}\n```")
++    return "\n\n".join(parts)
++
++
+ def optimize(
+     sys_desc: SystemDescription,
+     diagnosis: Diagnosis,
+@@ -37,9 +81,13 @@
+     """基于诊断结果生成 SEARCH/REPLACE diff patch，并进行自检评分。"""
+     diag_text = json.dumps(diagnosis.failure_patterns, indent=2, ensure_ascii=False)
+
++    # CRITICAL FIX: Read current workspace state instead of using stale sys_desc snapshot
++    # This ensures SEARCH blocks match the actual current file content
++    current_source_files = _read_current_workspace_files(sys_desc)
++
+     prompt = prompts.OPTIMIZER_PROMPT.format(
+         system_context=sys_desc.to_context_str(),
+-        source_code=sys_desc.get_source_context(),
++        source_code=_format_source_context(current_source_files),
+         diagnosis=diag_text,
+         past_attempts=past_attempts or "(none)",
+         layer_context=layer_context,

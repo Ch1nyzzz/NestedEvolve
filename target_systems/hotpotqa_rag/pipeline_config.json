@@ -1,0 +1,40 @@
+{
+  "inputs": ["question"],
+  "pipeline": [
+    {
+      "name": "question_rewriter",
+      "class": "QuestionRewriter",
+      "enabled": true,
+      "requires": ["question"],
+      "produces": ["rewritten_query", "is_ambiguous"]
+    },
+    {
+      "name": "info_extractor",
+      "class": "InfoExtractor",
+      "enabled": true,
+      "requires": ["rewritten_query"],
+      "produces": ["search_keywords"]
+    },
+    {
+      "name": "retriever",
+      "class": "Retriever",
+      "enabled": true,
+      "requires": ["search_keywords"],
+      "produces": ["retrieve_content", "retrieval_empty"]
+    },
+    {
+      "name": "hint_generator",
+      "class": "HintGenerator",
+      "enabled": true,
+      "requires": ["rewritten_query", "retrieve_content"],
+      "produces": ["hints"]
+    },
+    {
+      "name": "answer_generator",
+      "class": "AnswerGenerator",
+      "enabled": true,
+      "requires": ["rewritten_query", "hints"],
+      "produces": ["answer"]
+    }
+  ]
+}

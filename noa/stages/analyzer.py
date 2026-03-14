@@ -288,6 +288,84 @@ def analyze_incremental(
     ), pool
 
 
+def analyze_history_records(
+    sys_desc: SystemDescription,
+    history_records: list[dict],
+    model: str = DEFAULT_MODEL,
+    top_n: int = 10,
+    layer_context: str = "",
+    parent_summary: str = "",
+    history_source: str = "parent_history",
+    stats: dict | None = None,
+) -> Diagnosis:
+    """Analyze optimizer history directly for L2+, without Trajectory objects."""
+    if not history_records:
+        return Diagnosis(
+            failure_patterns=[],
+            summary="No history records.",
+            raw_analysis="",
+        )
+
+    is_meta = bool(layer_context and "META-OPTIMIZER" in layer_context)
+    if is_meta:
+        source_code = (
+            "## Source File Index (use read_source_file to inspect details)\n"
+            + sys_desc.get_source_index()
+        )
+    else:
+        source_code = sys_desc.get_source_context()
+
+    history_text = format_parent_history(history_records)
+    prompt = prompts.META_HISTORY_ANALYZER_PROMPT.format(
+        source_code=source_code,
+        system_context=sys_desc.to_context_str(),
+        parent_summary=parent_summary or "(none)",
+        history_source=history_source,
+        history_count=len(history_records),
+        history_text=history_text,
+        layer_context=layer_context,
+    )
+    resp = llm_call(
+        prompt,
+        model=model,
+        max_tokens=4096,
+        temperature=0,
+        system=prompts.META_HISTORY_ANALYZER_SYSTEM,
+    )
+    if stats is not None:
+        stats["llm_calls"] = stats.get("llm_calls", 0) + 1
+
+    patterns = _normalize_patterns(_parse_patterns(resp.text))
+    for p in patterns:
+        p.setdefault("count", 1)
+
+    valid_files = {sf.path for sf in sys_desc.source_files}
+    for p in patterns:
+        af = p.get("affected_file", "")
+        if af and af not in valid_files:
+            log.warning(
+                "Meta-history pattern affected_file '%s' not in source_files, clearing",
+                af,
+            )
+            p["affected_file"] = ""
+            p["root_cause"] = (
+                p.get("root_cause", "")
+                + f" [NOTE: Originally referenced '{af}' which is outside writable scope]"
+            )
+
+    patterns = patterns[:top_n]
+    summary = (
+        "; ".join(p.get("pattern", "") for p in patterns[:3])
+        if patterns
+        else "No patterns found."
+    )
+    return Diagnosis(
+        failure_patterns=patterns,
+        summary=summary,
+        raw_analysis=(resp.text or "")[:4000],
+    )
+
+
 def _trajectory_quality_context(
     trajectories: list[Trajectory], failures: list[Trajectory]
 ) -> str:
@@ -354,6 +432,73 @@ def format_parent_history(l1_history: list[dict]) -> str:
         return "(no L1 history)"
     parts = []
     for h in l1_history:
+        if "action" in h:
+            action = h.get("action", "?")
+            step = h.get("step", "?")
+            parts.append(f"### Step {step} [{action}]")
+
+            summary_fields = {
+                k: h[k]
+                for k in (
+                    "source",
+                    "episode_id",
+                    "n_records",
+                    "n_evals",
+                    "n_accepted",
+                    "n_analyzes",
+                    "label",
+                    "before_score",
+                    "after_score",
+                    "score",
+                    "accepted",
+                    "error",
+                    "reason",
+                    "child_level",
+                    "child_score",
+                    "child_accepted",
+                    "noa_modified",
+                    "trigger",
+                    "test_score",
+                    "baseline_score",
+                )
+                if k in h
+            }
+            if summary_fields:
+                parts.append(
+                    "Record: "
+                    + json.dumps(summary_fields, ensure_ascii=False, default=str)
+                )
+
+            rationale = h.get("rationale")
+            if rationale:
+                parts.append(f"Rationale: {str(rationale)[:500]}")
+
+            patterns = h.get("patterns", [])
+            if patterns:
+                parts.append("Patterns:")
+                for p in patterns[:5]:
+                    if isinstance(p, dict):
+                        parts.append(
+                            "  - "
+                            + json.dumps(p, ensure_ascii=False, default=str)[:500]
+                        )
+                    else:
+                        parts.append(f"  - {str(p)[:500]}")
+
+            ops = h.get("ops", [])
+            if ops:
+                parts.append("Patch ops:")
+                for op in ops[:5]:
+                    if isinstance(op, dict):
+                        parts.append(
+                            "  - "
+                            + json.dumps(op, ensure_ascii=False, default=str)[:500]
+                        )
+                    else:
+                        parts.append(f"  - {str(op)[:500]}")
+            parts.append("")
+            continue
+
         status = "ACCEPTED" if h.get("accepted") else "REJECTED"
         before = h.get("before", 0)
         after = h.get("after", 0)

@@ -8,9 +8,9 @@
   "optimizer": {
     "max_steps": 30,
     "n_samples": 30,
+    "provider": "anthropic",
     "model": "claude-haiku-4-5-20251001",
     "max_llm_calls": 150,
-    "max_evals": 20,
     "max_no_improve_steps": 8
   },
   "spawn": {
@@ -18,14 +18,12 @@
       "max_steps": 10,
       "n_samples": 1,
       "max_llm_calls": 80,
-      "max_evals": 10,
       "max_no_improve_steps": 5
     },
     "mini_l1": {
       "max_steps": 30,
       "n_samples": 30,
       "max_llm_calls": 150,
-      "max_evals": 20,
       "max_no_improve_steps": 8
     }
   },

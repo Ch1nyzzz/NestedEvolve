@@ -1,0 +1,33 @@
+{
+  "inputs": ["question", "context"],
+  "pipeline": [
+    {
+      "name": "context_model_selector",
+      "class": "ContextModelSelector",
+      "enabled": true,
+      "requires": ["context", "question"],
+      "produces": ["context_analyst_model"]
+    },
+    {
+      "name": "context_analyst",
+      "class": "ContextAnalyst",
+      "enabled": true,
+      "requires": ["context", "question", "context_analyst_model"],
+      "produces": ["summary"]
+    },
+    {
+      "name": "solver_model_selector",
+      "class": "SolverModelSelector",
+      "enabled": true,
+      "requires": ["question", "summary"],
+      "produces": ["problem_solver_model"]
+    },
+    {
+      "name": "problem_solver",
+      "class": "ProblemSolver",
+      "enabled": true,
+      "requires": ["question", "summary", "problem_solver_model"],
+      "produces": ["answer"]
+    }
+  ]
+}

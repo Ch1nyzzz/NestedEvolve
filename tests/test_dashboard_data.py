@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,9 +9,19 @@ from pathlib import Path
 from dashboard.data import (
     RunRecord,
     classify_children,
+    build_run_snapshot,
     is_active_run,
     pick_default_run,
 )
+from noa.core.protocol import (
+    LayerContext,
+    OptimizationBudget,
+    SourceFile,
+    SystemDescription,
+)
+from noa.sandbox_manager import SandboxManager
+from noa.trajectory_store import TrajectoryStore
+from noa.unified_agent import UnifiedOptimizerAgent
 
 
 class DashboardDataTests(unittest.TestCase):
@@ -88,6 +100,204 @@ class DashboardDataTests(unittest.TestCase):
 
         self.assertEqual([item["pid"] for item in active], [101])
         self.assertCountEqual([item["pid"] for item in stale], [202, 303])
+
+    def test_snapshot_infers_together_provider_from_observed_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run-1"
+            (run_dir / "state").mkdir(parents=True)
+            (run_dir / "logs" / "llm").mkdir(parents=True)
+
+            now = datetime(2026, 3, 12, 21, 0, 0, tzinfo=timezone.utc)
+            (run_dir / "state" / "current_run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "status": "running",
+                        "updated_at": now.isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "children.json").write_text("[]", encoding="utf-8")
+            (run_dir / "state" / "heartbeats.json").write_text("[]", encoding="utf-8")
+            (run_dir / "logs" / "llm" / "req.jsonl").write_text(
+                json.dumps(
+                    {
+                        "event": "request_started",
+                        "request_id": "req-1",
+                        "model": "together_ai/MiniMaxAI/MiniMax-M2.5",
+                        "resolved_model": "together_ai/MiniMaxAI/MiniMax-M2.5",
+                        "timestamp": now.timestamp(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = build_run_snapshot(
+                run_dir, now=now, pid_exists=lambda _pid: False
+            )
+            self.assertEqual(snapshot["configured_provider"], "together")
+            self.assertEqual(snapshot["configured_rpm_limit"], 55)
+
+
+class UnifiedAgentBatchEvalTests(unittest.TestCase):
+    def _make_agent(self, tmp_path: Path) -> UnifiedOptimizerAgent:
+        source_dir = tmp_path / "target"
+        noa_dir = tmp_path / "noa"
+        source_dir.mkdir()
+        noa_dir.mkdir()
+        (source_dir / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (noa_dir / "engine.py").write_text("FRAMEWORK = 1\n", encoding="utf-8")
+
+        sys_desc = SystemDescription(
+            workflow_summary="dummy workflow",
+            component_names=["dummy"],
+            source_files=[SourceFile(path="app.py", content="VALUE = 1\n")],
+            source_dir=str(source_dir),
+            baseline_score=0,
+        )
+        layer_context = LayerContext(
+            layer_id="L1",
+            level=1,
+            writable_root=str(source_dir),
+            readable_roots=[str(source_dir)],
+            parent_history=[],
+            max_depth=3,
+            max_spawn_calls=1,
+        )
+        budget = OptimizationBudget(
+            max_steps=5,
+            max_llm_calls=10,
+            max_no_improve_steps=5,
+            target_delta=float("inf"),
+            max_spawn_calls=1,
+        )
+        sandbox = SandboxManager(
+            str(source_dir),
+            str(tmp_path / "workspace"),
+            layer_context,
+        )
+        sandbox.save_accepted_snapshot()
+
+        return UnifiedOptimizerAgent(
+            sys_desc=sys_desc,
+            source_dir=str(source_dir),
+            target_factory=lambda path: {"path": path},
+            target={"path": str(source_dir)},
+            dataset=[],
+            eval_fn=lambda target, dataset: {"score": 0.0, "details": []},
+            score_fn=lambda prediction, ground_truth: 0.0,
+            model="dummy-model",
+            layer_context=layer_context,
+            budget=budget,
+            sandbox_manager=sandbox,
+            trajectory_store=TrajectoryStore(str(tmp_path / "trajectories")),
+            component_probe=None,
+            observer_search_roots=[str(source_dir)],
+            noa_dir=str(noa_dir),
+            project_root=str(tmp_path),
+            dataset_pickle_path=str(tmp_path / "dataset.pkl"),
+            spawn_config={"mini_l1": {}, "l2": {}},
+            train_pool=[],
+            test_set=[],
+            train_sample_size=1,
+            n_samples=1,
+            top_k=3,
+        )
+
+    def test_eval_candidate_auto_batches_pending_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            agent = self._make_agent(Path(tmp_dir))
+            agent._active_analysis_round = 1
+            agent._current_train_baseline = 50.0
+            agent.train_pool = [{"question": "q1"}, {"question": "q2"}]
+
+            agent._tool_checkpoint_candidate(
+                {
+                    "label": "cand_a",
+                    "rationale": "first hypothesis",
+                    "ops": [
+                        {
+                            "op": "update",
+                            "file_path": "app.py",
+                            "search": "VALUE = 1",
+                            "replace": "VALUE = 2",
+                        }
+                    ],
+                }
+            )
+            agent._tool_checkpoint_candidate(
+                {
+                    "label": "cand_b",
+                    "rationale": "second hypothesis",
+                    "ops": [
+                        {
+                            "op": "update",
+                            "file_path": "app.py",
+                            "search": "VALUE = 1",
+                            "replace": "VALUE = 3",
+                        }
+                    ],
+                }
+            )
+
+            seen_labels: list[str] = []
+
+            def fake_eval_in_sandbox(candidate_dir, *args, **kwargs):
+                label = Path(candidate_dir).name
+                seen_labels.append(label)
+                score = 0.81 if label == "cand_a" else 0.67
+                return {"ok": True, "score": score, "details": []}
+
+            agent.sandbox.eval_in_sandbox = fake_eval_in_sandbox
+
+            result = agent._tool_eval_candidate({"label": "cand_a"})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["mode"], "auto_batch")
+            self.assertEqual(set(result["batch_labels"]), {"cand_a", "cand_b"})
+            self.assertEqual(result["evaluated"], 2)
+            self.assertEqual(set(seen_labels), {"cand_a", "cand_b"})
+            self.assertEqual(result["results"]["cand_a"]["candidate_score"], 81.0)
+            self.assertEqual(result["results"]["cand_b"]["candidate_score"], 67.0)
+
+    def test_eval_candidate_stays_single_when_only_one_candidate_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            agent = self._make_agent(Path(tmp_dir))
+            agent._active_analysis_round = 1
+            agent._current_train_baseline = 50.0
+            agent.train_pool = [{"question": "q1"}]
+
+            agent._tool_checkpoint_candidate(
+                {
+                    "label": "cand_only",
+                    "rationale": "only hypothesis",
+                    "ops": [
+                        {
+                            "op": "update",
+                            "file_path": "app.py",
+                            "search": "VALUE = 1",
+                            "replace": "VALUE = 9",
+                        }
+                    ],
+                }
+            )
+
+            seen_labels: list[str] = []
+
+            def fake_eval_in_sandbox(candidate_dir, *args, **kwargs):
+                seen_labels.append(Path(candidate_dir).name)
+                return {"ok": True, "score": 0.74, "details": []}
+
+            agent.sandbox.eval_in_sandbox = fake_eval_in_sandbox
+
+            result = agent._tool_eval_candidate({"label": "cand_only"})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["candidate_label"], "cand_only")
+            self.assertNotEqual(result.get("mode"), "auto_batch")
+            self.assertEqual(seen_labels, ["cand_only"])
 
 
 if __name__ == "__main__":

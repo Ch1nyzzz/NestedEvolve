@@ -12,9 +12,32 @@ class ComponentProbe:
     """包装目标系统，提供单组件 / 部分管道执行能力。"""
 
     def __init__(self, adapter, sys_desc: SystemDescription, timeout: int = 30):
-        self.workflow = sys_desc.component_names
         self.timeout = timeout
         self.components = self._extract_components(adapter)
+        # 对齐 workflow 名称与 components 实际 key（LLM 可能生成 PascalCase，
+        # 但 pipeline 注册的是 snake_case），优先使用 components 中的 key
+        self.workflow = self._align_workflow(sys_desc.component_names)
+
+    def _align_workflow(self, raw_names: list[str]) -> list[str]:
+        """将 workflow 名称对齐到 components dict 的 key。"""
+        if not self.components:
+            return raw_names
+        comp_keys = list(self.components.keys())
+        # 建立 lower → actual key 的映射
+        lower_map = {k.lower().replace("_", ""): k for k in comp_keys}
+        aligned = []
+        for name in raw_names:
+            normalized = name.lower().replace("_", "")
+            if normalized in lower_map:
+                aligned.append(lower_map[normalized])
+            elif name in self.components:
+                aligned.append(name)
+            else:
+                aligned.append(name)  # 保留原名，run_from 会报错
+        # 如果对齐后完全匹配 components，直接用 components 顺序
+        if set(aligned) == set(comp_keys) and len(aligned) == len(comp_keys):
+            return aligned
+        return aligned if aligned else comp_keys
 
     def _extract_components(self, adapter) -> dict[str, object]:
         """从 adapter 提取组件。优先 get_components()，fallback 到反射。"""

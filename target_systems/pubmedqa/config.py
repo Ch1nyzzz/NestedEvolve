@@ -9,14 +9,9 @@ from . import prompts
 from utils.llm import resolve_model
 
 
-# 可选模型列表（用于模型选择优化）
+# 可选模型列表 — 仅包含默认输出模型，优化集中在算法/prompt 层面
 MODELS_LIST = [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "gpt-4-turbo",
-    "claude-3-5-haiku-20241022",
-    "claude-3-5-sonnet-20241022",
-    "claude-haiku-4-5-20251001",
+    "together_ai/Qwen/Qwen3.5-9B",
 ]
 
 
@@ -24,7 +19,7 @@ MODELS_LIST = [
 class ComponentConfig:
     name: str
     prompt_template: str
-    model: str = resolve_model("claude-haiku-4-5-20251001")
+    model: str = resolve_model("together_ai/Qwen/Qwen3.5-9B")
     max_tokens: int = 2048
     temperature: float = 0.0
 
@@ -32,7 +27,7 @@ class ComponentConfig:
 @dataclass
 class ModelSelectorConfig:
     name: str
-    selected_model: str = "claude-haiku-4-5-20251001"
+    selected_model: str = "together_ai/Qwen/Qwen3.5-9B"
     models_list: list[str] = field(default_factory=lambda: list(MODELS_LIST))
 
 

@@ -27,7 +27,6 @@ class NOptimizer:
         system_description: str = "",
         score_fn,
         max_llm_calls: int = 120,
-        max_evals: int = 20,
         max_no_improve_steps: int = 5,
         layer_context: LayerContext | None = None,
         observer_search_roots: list[str] | None = None,
@@ -35,22 +34,26 @@ class NOptimizer:
         dataset_pickle_path: str | None = None,
         spawn_config: dict | None = None,
         train_pool: list | None = None,
+        val_set: list | None = None,
         test_set: list | None = None,
         train_sample_size: int = 25,
         top_k: int = 3,
         initial_baseline_score: float | None = None,
         wall_budget_sec: float | None = None,
+        test_eval_fn=None,
     ):
         self.source_dir = source_dir
         self.target_factory = target_factory
         self.dataset = dataset
         self.eval_fn = eval_fn
+        self.test_eval_fn = test_eval_fn
         self.n_samples = n_samples
 
         self.model = model
         self.system_description = system_description
         self.score_fn = score_fn
         self.train_pool = train_pool
+        self.val_set = val_set
         self.test_set = test_set
         self.train_sample_size = train_sample_size
         self.top_k = top_k
@@ -61,7 +64,6 @@ class NOptimizer:
         self.budget = OptimizationBudget(
             max_steps=max_steps,
             max_llm_calls=max_llm_calls,
-            max_evals=max_evals,
             max_no_improve_steps=max_no_improve_steps,
             target_delta=float("inf"),
             max_spawn_calls=max_spawn,
@@ -156,12 +158,14 @@ class NOptimizer:
                 dataset_pickle_path=self.dataset_pickle_path,
                 spawn_config=self.spawn_config,
                 train_pool=self.train_pool,
+                val_set=self.val_set,
                 test_set=self.test_set,
                 train_sample_size=self.train_sample_size,
                 n_samples=self.n_samples,
                 top_k=self.top_k,
                 initial_baseline_score=self.initial_baseline_score,
                 wall_budget_sec=_wbs,
+                test_eval_fn=self.test_eval_fn,
             )
 
             result = agent.run()

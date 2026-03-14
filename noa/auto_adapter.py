@@ -117,6 +117,12 @@ def _make_factory(adapter_path: str, original_source_dir: str) -> callable:
             cls = getattr(mod, "AutoAdapter", None)
             if cls is None:
                 raise ValueError(f"adapter 文件 {fpath} 中未定义 AutoAdapter")
+            # 优先传 source_dir，让 pipeline 从正确目录加载 pipeline_config.json
+            import inspect
+
+            sig = inspect.signature(cls.__init__)
+            if "source_dir" in sig.parameters:
+                return cls(source_dir=target_dir)
             return cls()
         finally:
             # 恢复包路径（已加载的对象引用不受影响）
@@ -225,6 +231,11 @@ def _exec_adapter(code: str, source_dir: str) -> object:
     adapter_cls = namespace.get("AutoAdapter")
     if adapter_cls is None:
         raise ValueError("生成的代码中未定义 AutoAdapter 类")
+    import inspect
+
+    sig = inspect.signature(adapter_cls.__init__)
+    if "source_dir" in sig.parameters:
+        return adapter_cls(source_dir=source_dir)
     return adapter_cls()
 
 

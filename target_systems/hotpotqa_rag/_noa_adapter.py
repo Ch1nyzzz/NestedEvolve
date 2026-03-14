@@ -13,8 +13,8 @@ class AdapterResult:
 
 
 class AutoAdapter:
-    def __init__(self):
-        self.pipeline = RAGPipeline()
+    def __init__(self, source_dir: str | None = None):
+        self.pipeline = RAGPipeline(source_dir=source_dir)
 
     def __call__(self, question: str) -> AdapterResult:
         result = self.pipeline(question)

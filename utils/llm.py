@@ -49,27 +49,15 @@ class _CircuitBreaker:
 
 _circuit_breaker = _CircuitBreaker()
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
+# --- 统一模型 & Provider 入口 ---
+# provider 和 model 分离：同一个 model 可能由不同 provider 提供
+DEFAULT_PROVIDER = os.getenv("NOA_PROVIDER", "together_ai")
+DEFAULT_MODEL_NAME = os.getenv("NOA_MODEL", "moonshotai/Kimi-K2.5")
+DEFAULT_MODEL = f"{DEFAULT_PROVIDER}/{DEFAULT_MODEL_NAME}"
 
 _VT_API_BASE = "https://llm-api.arc.vt.edu/api/v1"
 _VT_API_KEY = os.getenv("VT_API_KEY")
-_VT_DEFAULT_MODEL = "MiniMax-M2.5"
-_TOGETHER_DEFAULT_MODEL = os.getenv("TOGETHER_MODEL", "MiniMaxAI/MiniMax-M2.5")
 
-_ANTHROPIC_MODEL_MAP = {
-    "gpt-5-nano": "claude-haiku-4-5-20251001",
-    "gpt-4.1-mini": "claude-haiku-4-5-20251001",
-    "gpt-4.1": "claude-haiku-4-5-20251001",
-}
-
-if LLM_PROVIDER == "openai":
-    DEFAULT_MODEL = "gpt-5-nano"
-elif LLM_PROVIDER == "vt":
-    DEFAULT_MODEL = _VT_DEFAULT_MODEL
-elif LLM_PROVIDER == "together":
-    DEFAULT_MODEL = _TOGETHER_DEFAULT_MODEL
-else:
-    DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_RETRIES = 3
 
 
@@ -83,11 +71,42 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-LLM_TIMEOUT_SEC = _env_float("LLM_TIMEOUT_SEC", 120.0)
-_HARD_TIMEOUT_SEC = _env_float("LLM_HARD_TIMEOUT_SEC", 300.0)
+LLM_TIMEOUT_SEC = _env_float("LLM_TIMEOUT_SEC", 300.0)
+_HARD_TIMEOUT_SEC = _env_float("LLM_HARD_TIMEOUT_SEC", 360.0)
 
-_DEFAULT_RPM = {"anthropic": 3800, "openai": 3800, "vt": 55, "together": 55}
-RPM_LIMIT = int(os.getenv("LLM_RPM_LIMIT", str(_DEFAULT_RPM.get(LLM_PROVIDER, 55))))
+
+_PROVIDER_ALIASES = {
+    "together_ai": "together",
+    "together": "together",
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "vt": "vt",
+}
+
+
+def infer_provider_from_model(model: str) -> str:
+    """从 model 名自动推断 provider（用于 RPM 等配置）。"""
+    normalized = (model or "").lower()
+    # 检查是否有已知 provider 前缀
+    prefix = normalized.split("/")[0] if "/" in normalized else ""
+    if prefix in _PROVIDER_ALIASES:
+        return _PROVIDER_ALIASES[prefix]
+    if "claude" in normalized or "anthropic" in normalized:
+        return "anthropic"
+    if normalized.startswith("gpt-"):
+        return "openai"
+    return _PROVIDER_ALIASES.get(DEFAULT_PROVIDER, "together")
+
+
+_DEFAULT_RPM = {"anthropic": 3800, "openai": 3800, "vt": 55, "together": 3000}
+RPM_LIMIT = int(
+    os.getenv(
+        "LLM_RPM_LIMIT",
+        str(
+            _DEFAULT_RPM.get(_PROVIDER_ALIASES.get(DEFAULT_PROVIDER, "together"), 3000)
+        ),
+    )
+)
 
 
 class _RateLimiter:
@@ -136,6 +155,10 @@ class _RateLimiter:
 _rate_limiter = _RateLimiter(RPM_LIMIT)
 
 
+def rpm_limit_for_provider(provider: str) -> int:
+    return int(os.getenv("LLM_RPM_LIMIT", str(_DEFAULT_RPM.get(provider, 3000))))
+
+
 def _content_chars(content) -> int:
     if isinstance(content, str):
         return len(content)
@@ -150,20 +173,31 @@ def _content_chars(content) -> int:
     return len(str(content or ""))
 
 
-def resolve_model(model: str) -> str:
-    """根据 LLM_PROVIDER 将模型名映射到对应的提供商模型。"""
-    if LLM_PROVIDER == "vt":
-        return f"openai/{_VT_DEFAULT_MODEL}"
-    if LLM_PROVIDER == "together":
-        return f"together_ai/{_TOGETHER_DEFAULT_MODEL}"
-    if LLM_PROVIDER == "anthropic" and model.startswith("gpt"):
-        return _ANTHROPIC_MODEL_MAP.get(model, "claude-haiku-4-5-20251001")
-    return model
+def resolve_model(model: str, provider: str | None = None) -> str:
+    """组合 provider + model → litellm 格式。
+
+    - model 已含已知 provider 前缀 → 直接返回
+    - 显式传了 provider → 拼接
+    - litellm 自动路由的模型名（claude-*, gpt-*）→ 不加前缀
+    - 其余 → 用 DEFAULT_PROVIDER 拼接
+    """
+    if "/" in model:
+        prefix = model.split("/")[0].lower()
+        if prefix in _PROVIDER_ALIASES:
+            return model
+    if provider:
+        return f"{provider}/{model}"
+    # litellm 能自动路由的模型，不需要 provider 前缀
+    lower = model.lower()
+    if lower.startswith("claude") or lower.startswith("gpt-"):
+        return model
+    return f"{DEFAULT_PROVIDER}/{model}"
 
 
 def _vt_kwargs() -> dict:
     """VT ARC API 的额外参数。"""
-    if LLM_PROVIDER == "vt":
+    provider = infer_provider_from_model(DEFAULT_MODEL)
+    if provider == "vt":
         key = os.getenv("VT_API_KEY") or _VT_API_KEY
         os.environ["OPENAI_API_KEY"] = key or ""
         os.environ["OPENAI_API_BASE"] = _VT_API_BASE
@@ -269,12 +303,14 @@ def _completion_with_hard_timeout(**kwargs):
     response_path = _temp_json_path(f"llm_resp_{request_id}_")
     log_path = llm_log_path(request_id)
     messages = kwargs.get("messages", [])
+    resolved_model = kwargs.get("model", "")
+    provider = infer_provider_from_model(resolved_model)
     request = {
         "request_id": request_id,
         "kwargs": kwargs,
         "meta": {
-            "provider": LLM_PROVIDER,
-            "resolved_model": kwargs.get("model"),
+            "provider": provider,
+            "resolved_model": resolved_model,
             "message_count": len(messages),
             "tool_count": len(kwargs.get("tools", []) or []),
             "input_chars": sum(_content_chars(msg.get("content")) for msg in messages),
@@ -350,7 +386,7 @@ def llm_call(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                timeout=LLM_TIMEOUT_SEC,
+                request_timeout=LLM_TIMEOUT_SEC,
                 **_vt_kwargs(),
             )
             latency = (time.time() - t0) * 1000
@@ -395,7 +431,7 @@ def llm_call_with_tools(
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,
-        timeout=LLM_TIMEOUT_SEC,
+        request_timeout=LLM_TIMEOUT_SEC,
     )
     if tools:
         kwargs["tools"] = tools

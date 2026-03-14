@@ -15,7 +15,6 @@ from noa.auto_adapter import auto_adapt
 from scripts.archive_trajectories import archive_and_reset_trajectory_dir
 from target_systems.hotpotqa_rag.evaluate import evaluate_batch, f1_score
 from utils.data import load_hotpotqa
-from utils.llm import resolve_model
 
 
 def main():
@@ -31,7 +30,9 @@ def main():
     history = cfg.get("history", {})
     output = cfg.get("output")
 
-    model = resolve_model(opt.get("model", "gpt-4.1-mini"))
+    from utils.llm import resolve_model
+
+    model = resolve_model(opt.get("model", "gpt-4.1-mini"), opt.get("provider"))
     project_root = Path(__file__).resolve().parent.parent
     source_dir = str(
         Path(__file__).resolve().parent.parent / "target_systems" / "hotpotqa_rag"
@@ -70,13 +71,12 @@ def main():
         source_dir=source_dir,
         target_factory=target_factory,
         dataset=train_pool,
-        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=5),
+        eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=50),
         score_fn=f1_score,
         l1_max_steps=opt.get("max_steps", 20),
         l1_n_samples=opt.get("n_samples", 50),
         l1_model=model,
         l1_max_llm_calls=opt.get("max_llm_calls", 80),
-        l1_max_evals=opt.get("max_evals", 12),
         l1_max_no_improve_steps=opt.get("max_no_improve_steps", 5),
         max_depth=nest.get("max_depth", 3),
         max_spawn_calls=nest.get("max_spawn_calls", 2),

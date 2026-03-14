@@ -12,6 +12,12 @@ from typing import Any, Callable
 ACTIVE_RUN_WINDOW_SEC = 60
 HEARTBEAT_STALE_SEC = 15
 LLM_RATE_WINDOW_SEC = 60
+DEFAULT_RPM_BY_PROVIDER = {
+    "anthropic": 3800,
+    "openai": 3800,
+    "vt": 55,
+    "together": 55,
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,23 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     return rows
+
+
+def infer_provider_from_model(model: str) -> str | None:
+    normalized = (model or "").lower()
+    if not normalized:
+        return None
+    if normalized.startswith("together_ai/") or "minimaxai/" in normalized:
+        return "together"
+    if normalized.startswith("openai/"):
+        return "vt" if "minimax-m2.5" in normalized else "openai"
+    if normalized.startswith("gpt-"):
+        return "openai"
+    if "claude" in normalized or "anthropic" in normalized:
+        return "anthropic"
+    if normalized == "minimax-m2.5":
+        return "vt"
+    return None
 
 
 def list_runs(root: Path) -> list[RunRecord]:
@@ -245,6 +268,20 @@ def summarize_llm_entries(
             if item.get("resolved_model") or item.get("model")
         }
     )
+    provider_counts: dict[str, int] = {}
+    for item in started.values():
+        provider = item.get("provider") or infer_provider_from_model(
+            str(item.get("resolved_model") or item.get("model") or "")
+        )
+        if not provider:
+            continue
+        provider_counts[str(provider)] = provider_counts.get(str(provider), 0) + 1
+    observed_providers = sorted(provider_counts)
+    dominant_provider = None
+    if provider_counts:
+        dominant_provider = max(
+            provider_counts.items(), key=lambda pair: (pair[1], pair[0])
+        )[0]
 
     return {
         "total_requests": len(started),
@@ -257,6 +294,9 @@ def summarize_llm_entries(
         "p95_latency_ms": _percentile(latencies, 0.95),
         "recent_errors": recent_errors,
         "models": models,
+        "provider_counts": provider_counts,
+        "observed_providers": observed_providers,
+        "dominant_provider": dominant_provider,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
@@ -415,6 +455,13 @@ def build_run_snapshot(
     heartbeats = _read_json(run_dir / "state" / "heartbeats.json", [])
     events = load_run_events(run_dir)
     llm_entries = load_llm_entries(run_dir)
+    llm_summary = summarize_llm_entries(llm_entries, now=now)
+    configured_provider = current_run.get("llm_provider") or llm_summary.get(
+        "dominant_provider"
+    )
+    configured_rpm_limit = current_run.get("llm_rpm_limit")
+    if configured_provider and not configured_rpm_limit:
+        configured_rpm_limit = DEFAULT_RPM_BY_PROVIDER.get(str(configured_provider))
     active_children, stale_children = classify_children(
         children if isinstance(children, list) else [],
         heartbeats if isinstance(heartbeats, list) else [],
@@ -437,5 +484,7 @@ def build_run_snapshot(
         "timeline": timeline_rows(events),
         "candidate_rows": build_candidate_rows(events),
         "llm_entries": llm_entries,
-        "llm_summary": summarize_llm_entries(llm_entries, now=now),
+        "llm_summary": llm_summary,
+        "configured_provider": configured_provider,
+        "configured_rpm_limit": configured_rpm_limit,
     }

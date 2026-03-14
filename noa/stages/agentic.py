@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 # 默认墙钟超时 (秒)，0 表示不限制。改为 4h (从 600s)
 _DEFAULT_WALL_TIMEOUT = 14400
 # 连续 LLM 调用失败 N 次后放弃当前 loop
-_MAX_CONSECUTIVE_ERRORS = 3
+_MAX_CONSECUTIVE_ERRORS = 5
 
 
 def agentic_loop(
@@ -34,6 +34,8 @@ def agentic_loop(
     no_tool_call_prompt: str | None = None,
     stats: dict | None = None,
     wall_timeout_sec: float = _DEFAULT_WALL_TIMEOUT,
+    compact_fn: Callable[[list[dict]], list[dict]] | None = None,
+    compact_threshold: int = 0,
 ) -> str:
     """通用多轮 tool-calling 循环。
 
@@ -101,10 +103,12 @@ def agentic_loop(
             consecutive_errors = 0
         except Exception as e:
             consecutive_errors += 1
+            backoff = min(2**consecutive_errors, 30)  # 2, 4, 8, 16, 30s
             log.warning(
-                "[agentic_loop] LLM 调用失败 (%d/%d): %s",
+                "[agentic_loop] LLM 调用失败 (%d/%d), %.0fs 后重试: %s",
                 consecutive_errors,
                 _MAX_CONSECUTIVE_ERRORS,
+                backoff,
                 str(e)[:200],
             )
             if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
@@ -115,6 +119,7 @@ def agentic_loop(
                     stats["llm_calls"] = llm_call_count
                     stats["exit_reason"] = "consecutive_errors"
                 return last_text
+            time.sleep(backoff)
             continue
         llm_call_count += 1
 
@@ -168,6 +173,20 @@ def agentic_loop(
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": result_text}
                 )
+                # compact 检查: threshold 触发 或 tool 返回 __force_compact__
+                _force = '"__force_compact__"' in result_text
+                if compact_fn is not None and (
+                    _force
+                    or (compact_threshold > 0 and len(messages) > compact_threshold)
+                ):
+                    before_len = len(messages)
+                    messages[:] = compact_fn(messages)
+                    if len(messages) < before_len:
+                        log.info(
+                            "[agentic_loop] compact: %d -> %d messages",
+                            before_len,
+                            len(messages),
+                        )
                 calls_remaining -= 1
                 if early_stop_fn is not None and early_stop_fn():
                     return resp.text or ""

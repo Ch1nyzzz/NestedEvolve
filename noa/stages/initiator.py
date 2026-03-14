@@ -53,7 +53,7 @@ def collect_sources(source_dir: str) -> list[SourceFile]:
     _EXTENSIONS = {".py", ".json"}
     source_files = []
     for root, dirs, files in os.walk(source_dir):
-        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", ".noa_meta")]
         for fname in sorted(files):
             ext = os.path.splitext(fname)[1]
             if ext not in _EXTENSIONS or fname == "_noa_adapter.py":

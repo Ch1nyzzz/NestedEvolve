@@ -2,28 +2,27 @@
   "target": "pubmedqa",
   "data": {
     "total_n": 500,
-    "test_n": 50,
+    "test_n": 200,
+    "val_n": 50,
     "train_sample_size": 10,
     "split": "train"
   },
   "optimizer": {
-    "max_steps": 10,
+    "max_steps": 30,
     "n_samples": 10,
-    "model": "together_ai/moonshotai/Kimi-K2.5",
-    "max_evals": 8,
-    "max_no_improve_steps": 4
+    "provider": "together_ai",
+    "model": "moonshotai/Kimi-K2.5",
+    "max_no_improve_steps": 8
   },
   "spawn": {
     "l2": {
-      "max_steps": 5,
+      "max_steps": 20,
       "n_samples": 1,
-      "max_evals": 5,
-      "max_no_improve_steps": 3
+      "max_no_improve_steps": 6
     },
     "mini_l1": {
       "max_steps": 10,
       "n_samples": 10,
-      "max_evals": 8,
       "max_no_improve_steps": 4
     }
   },

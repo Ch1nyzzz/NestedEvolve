@@ -87,10 +87,10 @@ def run_layer_subprocess(
     timeout: int = 28800,
     isolate_source: bool = False,
     max_llm_calls: int = 80,
-    max_evals: int = 12,
     max_no_improve_steps: int = 5,
     random_seed: int | None = None,
     train_pool_pickle_path: str | None = None,
+    val_set_pickle_path: str | None = None,
     test_set_pickle_path: str | None = None,
     train_sample_size: int = 25,
     top_k: int = 3,
@@ -149,12 +149,17 @@ def run_layer_subprocess(
             dataset = pickle.load(f)
 
         train_pool = None
+        val_set = None
         test_set = None
         _train_path = {train_pool_pickle_path!r}
+        _val_path = {val_set_pickle_path!r}
         _test_path = {test_set_pickle_path!r}
         if _train_path and os.path.exists(_train_path):
             with open(_train_path, "rb") as f:
                 train_pool = pickle.load(f)
+        if _val_path and os.path.exists(_val_path):
+            with open(_val_path, "rb") as f:
+                val_set = pickle.load(f)
         if _test_path and os.path.exists(_test_path):
             with open(_test_path, "rb") as f:
                 test_set = pickle.load(f)
@@ -184,19 +189,21 @@ def run_layer_subprocess(
         else:
             raise RuntimeError(f"evaluate.py not found at {{l0_source_dir}}")
 
+        eval_workers = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "25")))
+
         optimizer = NOptimizer(
             source_dir=l0_source_dir,
             target_factory=target_factory,
             dataset=dataset,
-            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=5),
+            eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=eval_workers),
             max_steps={max_steps},
             n_samples={n_samples},
             model={model!r},
             score_fn=score_fn,
             max_llm_calls={max_llm_calls},
-            max_evals={max_evals},
             max_no_improve_steps={max_no_improve_steps},
             train_pool=train_pool,
+            val_set=val_set,
             test_set=test_set,
             train_sample_size={train_sample_size},
             top_k={top_k},

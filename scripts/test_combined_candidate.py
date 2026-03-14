@@ -22,7 +22,7 @@ def main():
     opt = cfg.get("optimizer", {})
     spawn = cfg.get("spawn", {})
 
-    model = resolve_model(opt.get("model", "together_ai/moonshotai/Kimi-K2.5"))
+    model = resolve_model(opt.get("model", "moonshotai/Kimi-K2.5"), opt.get("provider"))
     project_root = Path(__file__).resolve().parent.parent
     source_dir = str(project_root / "target_systems" / "pubmedqa")
 
@@ -75,7 +75,6 @@ def main():
         max_steps=ml1.get("max_steps", opt.get("max_steps", 10)),
         n_samples=ml1.get("n_samples", opt.get("n_samples", 10)),
         max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 80)),
-        max_evals=ml1.get("max_evals", opt.get("max_evals", 8)),
         max_no_improve_steps=ml1.get(
             "max_no_improve_steps", opt.get("max_no_improve_steps", 4)
         ),

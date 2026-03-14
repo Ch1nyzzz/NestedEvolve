@@ -36,7 +36,7 @@ def main():
     spawn = cfg.get("spawn", {})
     output = "results_pubmedqa_l2_only.json"
 
-    model = resolve_model(opt.get("model", "together_ai/moonshotai/Kimi-K2.5"))
+    model = resolve_model(opt.get("model", "moonshotai/Kimi-K2.5"), opt.get("provider"))
     project_root = Path(__file__).resolve().parent.parent
     source_dir = str(project_root / "target_systems" / "pubmedqa")
 
@@ -99,7 +99,6 @@ def main():
                 max_steps=ml1.get("max_steps", opt.get("max_steps", 10)),
                 n_samples=ml1.get("n_samples", opt.get("n_samples", 10)),
                 max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 80)),
-                max_evals=ml1.get("max_evals", opt.get("max_evals", 8)),
                 max_no_improve_steps=ml1.get(
                     "max_no_improve_steps", opt.get("max_no_improve_steps", 4)
                 ),
@@ -169,7 +168,6 @@ def main():
     print(f"  noa_dir: {noa_dir}")
     print(f"  model: {model}")
     print(f"  max_steps: {l2_cfg.get('max_steps', 5)}")
-    print(f"  max_evals: {l2_cfg.get('max_evals', 5)}")
     print(f"  mini_l1 config: {ml1}")
     print(f"{'=' * 60}\n")
 
@@ -183,7 +181,6 @@ def main():
         model=model,
         score_fn=child_score_fn,
         max_llm_calls=l2_cfg.get("max_llm_calls", 60),
-        max_evals=l2_cfg.get("max_evals", 5),
         max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 3),
         layer_context=child_layer_context,
         observer_search_roots=[noa_dir],

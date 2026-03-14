@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 
 from .config import SystemConfig
@@ -12,6 +14,22 @@ from .components import (
     HintGenerator,
     AnswerGenerator,
 )
+
+COMPONENT_REGISTRY = {
+    "QuestionRewriter": QuestionRewriter,
+    "InfoExtractor": InfoExtractor,
+    "Retriever": Retriever,
+    "HintGenerator": HintGenerator,
+    "AnswerGenerator": AnswerGenerator,
+}
+
+_CONFIG_FIELD_MAP = {
+    "question_rewriter": "question_rewriter",
+    "info_extractor": "info_extractor",
+    "retriever": "retriever",
+    "hint_generator": "hint_generator",
+    "answer_generator": "answer_generator",
+}
 
 
 @dataclass
@@ -24,20 +42,43 @@ class RAGPipeline:
     """HotpotQA RAG Pipeline — 5 组件顺序执行。"""
 
     def __init__(
-        self, config: SystemConfig | None = None, corpus: list[str] | None = None
+        self,
+        config: SystemConfig | None = None,
+        corpus: list[str] | None = None,
+        source_dir: str | None = None,
     ):
         self.config = config or SystemConfig()
         self.corpus = corpus
+        self._source_dir = source_dir or os.path.dirname(__file__)
         self._build_components()
 
     def _build_components(self):
-        self.components = [
-            ("question_rewriter", QuestionRewriter(self.config.question_rewriter)),
-            ("info_extractor", InfoExtractor(self.config.info_extractor)),
-            ("retriever", Retriever(self.config.retriever, corpus=self.corpus)),
-            ("hint_generator", HintGenerator(self.config.hint_generator)),
-            ("answer_generator", AnswerGenerator(self.config.answer_generator)),
-        ]
+        config_path = os.path.join(self._source_dir, "pipeline_config.json")
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                pipeline_def = json.load(f)["pipeline"]
+            self.components = []
+            for entry in pipeline_def:
+                if not entry.get("enabled", True):
+                    continue
+                cls = COMPONENT_REGISTRY[entry["class"]]
+                cfg_field = _CONFIG_FIELD_MAP.get(entry["name"])
+                if cfg_field:
+                    cfg = getattr(self.config, cfg_field)
+                    if cls is Retriever:
+                        self.components.append(
+                            (entry["name"], cls(cfg, corpus=self.corpus))
+                        )
+                    else:
+                        self.components.append((entry["name"], cls(cfg)))
+        else:
+            self.components = [
+                ("question_rewriter", QuestionRewriter(self.config.question_rewriter)),
+                ("info_extractor", InfoExtractor(self.config.info_extractor)),
+                ("retriever", Retriever(self.config.retriever, corpus=self.corpus)),
+                ("hint_generator", HintGenerator(self.config.hint_generator)),
+                ("answer_generator", AnswerGenerator(self.config.answer_generator)),
+            ]
 
     def __call__(self, question: str) -> PipelineResult:
         ctx = {"question": question}

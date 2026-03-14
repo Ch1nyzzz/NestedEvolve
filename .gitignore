@@ -1,6 +1,4 @@
-memory_bank/
 Papers/
-CLAUDE.md
 .DS_Store
 *.log
 .env
@@ -21,6 +19,10 @@ coverage/
 *.db
 
 # Claude Code / Codex / Metaswarm toolchain
+!AGENTS.md
+!CLAUDE.md
+!memory_bank/
+!memory_bank/**
 .claude/
 .metaswarm/
 .github/
@@ -29,6 +31,7 @@ coverage/
 .coverage-thresholds.json
 .env.example
 SERVICE-INVENTORY.md
+ace/
 bin/
 scripts/beads-*.ts
 tests/

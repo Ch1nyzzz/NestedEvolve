@@ -1,0 +1,109 @@
+--- /Users/erv1n/NestedAgent/noa/stages/analyzer.py	2026-03-10 08:26:08
++++ /Users/erv1n/NestedAgent/.noa_runs/noa_unified_l2/_sandbox_candidates/combined_framework_fixes/stages/analyzer.py	2026-03-10 15:56:10
+@@ -392,22 +392,100 @@
+
+
+ def _parse_patterns(text: str) -> list[dict]:
+-    """从 LLM 输出中提取 failure patterns JSON 列表。"""
++    """从 LLM 输出中提取 failure patterns JSON 列表。
++
++    使用多层解析策略：
++    1. 首先尝试直接解析整个文本为 JSON
++    2. 尝试提取 ```json ... ``` 代码块
++    3. 使用智能括号匹配提取完整的 JSON 数组
++    4. 使用行级解析作为兜底
++    """
++    # 策略 1: 直接解析
+     try:
+         result = json.loads(text)
+         if isinstance(result, list):
+             return _normalize_patterns(result)
+     except json.JSONDecodeError:
+         pass
++
++    # 策略 2: 提取 ```json 代码块
++    if "```json" in text:
++        start = text.find("```json")
++        end = text.find("```", start + 7)
++        if end != -1:
++            try:
++                block = text[start + 7 : end].strip()
++                result = json.loads(block)
++                if isinstance(result, list):
++                    return _normalize_patterns(result)
++            except json.JSONDecodeError:
++                pass
++
++    # 策略 3: 智能括号匹配 - 找到最外层的 [...]
++    # 使用深度计数找到匹配的括号对，避免截断
+     left = text.find("[")
+-    right = text.rfind("]")
+-    if left != -1 and right != -1:
+-        try:
+-            result = json.loads(text[left : right + 1])
+-            if isinstance(result, list):
+-                return _normalize_patterns(result)
+-        except json.JSONDecodeError:
++    if left != -1:
++        depth = 0
++        in_string = False
++        escape_next = False
++        for i, ch in enumerate(text[left:], start=left):
++            if escape_next:
++                escape_next = False
++                continue
++            if ch == "\\":
++                escape_next = True
++                continue
++            if ch == '"' and (i == 0 or text[i-1] != "\\"):
++                in_string = not in_string
++                continue
++            if not in_string:
++                if ch == "[":
++                    depth += 1
++                elif ch == "]":
++                    depth -= 1
++                    if depth == 0:
++                        # 找到匹配的闭合括号
++                        try:
++                            result = json.loads(text[left : i + 1])
++                            if isinstance(result, list):
++                                return _normalize_patterns(result)
++                        except json.JSONDecodeError:
++                            pass
++                        break
++
++    # 策略 4: 尝试提取单个 JSON 对象（如果 LLM 返回的是单个 pattern 而非数组）
++    left_obj = text.find("{")
++    right_obj = text.rfind("}")
++    if left_obj != -1 and right_obj != -1 and left_obj < right_obj:
++        try:
++            # 同样使用深度计数找到匹配的 {...}
++            depth = 0
++            in_string = False
++            escape_next = False
++            for i, ch in enumerate(text[left_obj:], start=left_obj):
++                if escape_next:
++                    escape_next = False
++                    continue
++                if ch == "\\":
++                    escape_next = True
++                    continue
++                if ch == '"' and (i == 0 or text[i-1] != "\\"):
++                    in_string = not in_string
++                    continue
++                if not in_string:
++                    if ch == "{":
++                        depth += 1
++                    elif ch == "}":
++                        depth -= 1
++                        if depth == 0:
++                            obj = json.loads(text[left_obj : i + 1])
++                            if isinstance(obj, dict):
++                                return _normalize_patterns([obj])
++                            break
++        except (json.JSONDecodeError, ValueError):
+             pass
++
++    # 兜底：返回空列表
+     return []

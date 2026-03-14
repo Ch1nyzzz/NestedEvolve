@@ -13,8 +13,8 @@ class AdapterResult:
 
 
 class AutoAdapter:
-    def __init__(self):
-        self.pipeline = PubMedQAPipeline()
+    def __init__(self, source_dir: str | None = None):
+        self.pipeline = PubMedQAPipeline(source_dir=source_dir)
 
     def __call__(self, question: str, context: str = "") -> AdapterResult:
         result = self.pipeline(question=question, context=context)

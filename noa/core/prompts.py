@@ -132,6 +132,47 @@ When done, output your diagnosis as JSON:
 [{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "high|medium|low", "affected_file": "...", "suggested_fix": "...", "merge_to": <int or null>}}]
 {layer_context}"""
 
+# --- Meta History Analyzer (L2 parent_history / own_eval_history) ---
+
+META_HISTORY_ANALYZER_SYSTEM = "You are an expert meta-optimizer analyst. You diagnose optimizer-framework flaws from lower-layer optimization history."
+
+META_HISTORY_ANALYZER_PROMPT = """\
+## Optimizer Framework Source Code
+{source_code}
+
+## System Overview
+{system_context}
+
+## Parent Summary
+{parent_summary}
+
+## Lower-Layer Optimization History
+Source: {history_source}
+Record count: {history_count}
+
+{history_text}
+
+## Task
+Analyze the optimization history itself, not the end-user target behavior.
+Identify framework-level failure patterns such as:
+- bad patch generation strategy
+- brittle analysis/parsing
+- stale workspace state
+- evaluation leakage or misleading scoring
+- missing guardrails or candidate propagation bugs
+
+Each pattern must:
+1. Describe the optimizer failure mode
+2. Explain the framework-level root cause
+3. Name the affected optimizer component/file
+4. Suggest a concrete fix in the optimizer framework
+
+If you are a meta-optimizer (layer_context is present), the `affected_file` MUST be within your writable optimizer-framework scope. Do NOT reference target-system files.
+
+Output JSON:
+[{{"pattern": "...", "root_cause": "...", "affected_component": "...", "severity": "high|medium|low", "affected_file": "...", "suggested_fix": "..."}}]
+{layer_context}"""
+
 # --- Optimizer ---
 
 OPTIMIZER_SYSTEM = "You are a precise code optimizer. You output SEARCH/REPLACE diffs."

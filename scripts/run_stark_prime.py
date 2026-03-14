@@ -41,11 +41,11 @@ class _TeeWriter:
 def _setup_logging(run_dir: Path):
     run_dir.mkdir(parents=True, exist_ok=True)
     log_path = run_dir / "noa.log"
-    log_file = open(log_path, "a", encoding="utf-8")
+    log_file = open(log_path, "w", encoding="utf-8")
     sys.stdout = _TeeWriter(log_file, sys.__stdout__)
 
     fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s")
-    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh = logging.FileHandler(log_path, mode="a", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
 
@@ -79,7 +79,9 @@ def main():
     history = cfg.get("history", {})
     output = cfg.get("output")
 
-    model = opt.get("model", "together_ai/moonshotai/Kimi-K2.5")
+    from utils.llm import resolve_model
+
+    model = resolve_model(opt.get("model", "moonshotai/Kimi-K2.5"), opt.get("provider"))
     metric = data.get("metric", "mrr")
     split_mode = data.get("split_mode", "paper")
     project_root = Path(__file__).resolve().parent.parent
@@ -120,7 +122,6 @@ def main():
         l1_n_samples=opt.get("n_samples", 10),
         l1_model=model,
         l1_max_llm_calls=opt.get("max_llm_calls", 150),
-        l1_max_evals=opt.get("max_evals", 8),
         l1_max_no_improve_steps=opt.get("max_no_improve_steps", 4),
         max_depth=nest.get("max_depth", 2),
         max_spawn_calls=nest.get("max_spawn_calls", 1),

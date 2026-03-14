@@ -9,9 +9,9 @@
   "optimizer": {
     "max_steps": 30,
     "n_samples": 30,
-    "model": "together_ai/moonshotai/Kimi-K2.5",
+    "provider": "together_ai",
+    "model": "MiniMaxAI/MiniMax-M2.5",
     "max_llm_calls": 150,
-    "max_evals": 20,
     "max_no_improve_steps": 8
   },
   "nesting": {

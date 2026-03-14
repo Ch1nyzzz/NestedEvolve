@@ -9,21 +9,19 @@
   "optimizer": {
     "max_steps": 10,
     "n_samples": 10,
-    "model": "together_ai/moonshotai/Kimi-K2.5",
-    "max_evals": 8,
+    "provider": "together_ai",
+    "model": "moonshotai/Kimi-K2.5",
     "max_no_improve_steps": 4
   },
   "spawn": {
     "l2": {
       "max_steps": 5,
       "n_samples": 1,
-      "max_evals": 5,
       "max_no_improve_steps": 3
     },
     "mini_l1": {
       "max_steps": 10,
       "n_samples": 10,
-      "max_evals": 8,
       "max_no_improve_steps": 4
     }
   },

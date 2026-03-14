@@ -716,13 +716,18 @@ def _run_fresh_observe(
     sampled = rng.sample(dataset, min(n_samples, len(dataset)))
 
     trajectories: list[Trajectory] = []
-    for ex in sampled:
+    total = len(sampled)
+    correct = 0
+    print(f"[FreshObserve] Running {total} samples...")
+    for i, ex in enumerate(sampled):
         try:
             kwargs = {"question": ex.question}
             if getattr(ex, "context", ""):
                 kwargs["context"] = ex.context
             result = target(**kwargs)
             score = score_fn(result.answer, ex.answer)
+            if score > 0:
+                correct += 1
             trajectories.append(
                 Trajectory(
                     question=ex.question,
@@ -753,6 +758,9 @@ def _run_fresh_observe(
                     intermediate_complete=False,
                 )
             )
+        if (i + 1) % 5 == 0 or i + 1 == total:
+            print(f"[FreshObserve] {i+1}/{total} done (correct so far: {correct})")
+    print(f"[FreshObserve] Finished: {correct}/{total} correct")
     return trajectories
 
 
