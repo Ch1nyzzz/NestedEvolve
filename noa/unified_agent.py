@@ -142,6 +142,10 @@ class UnifiedOptimizerAgent:
         self._current_train_baseline: float = 0.0
         # Top-K 候选池
         self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}]
+        # 跨轮持久候选记录 — 永不自动清空
+        self._hall_of_fame: dict[
+            str, dict
+        ] = {}  # label -> {label, score, val_score, ops, rationale}
         # compact 计数器
         self._compact_chunk_counter = 0
         # eval 结果缓存: ops_hash -> eval result dict
@@ -490,6 +494,30 @@ class UnifiedOptimizerAgent:
         L2+ 层: mini-L1 的 eval_candidate 已在 test_set 上做过 final eval，
         跳过冗余 FinalEval，直接用已有分数 commit 最优候选。
         """
+        # 从 hall_of_fame 恢复磁盘上仍存在的候选，合并进 _top_candidates
+        if self._hall_of_fame:
+            existing_labels = {c["label"] for c in self._top_candidates}
+            for label, hof_entry in self._hall_of_fame.items():
+                if label in existing_labels:
+                    continue
+                candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+                if os.path.isdir(candidate_dir):
+                    self._top_candidates.append(dict(hof_entry))
+            # 按 val_score（优先）或 score 排序，取 top-K
+            self._top_candidates.sort(
+                key=lambda c: (c.get("val_score") or 0, c.get("score", 0)),
+                reverse=True,
+            )
+            self._top_candidates = self._top_candidates[
+                : max(self.top_k, len(self._top_candidates))
+            ]
+            if self._top_candidates:
+                log.info(
+                    "[FinalEval] Restored %d candidates from hall_of_fame, total %d",
+                    len(self._top_candidates) - len(existing_labels),
+                    len(self._top_candidates),
+                )
+
         if not self._top_candidates:
             self._push_history(
                 {
@@ -1001,6 +1029,20 @@ class UnifiedOptimizerAgent:
                     train_bl,
                 )
                 self._update_top_candidates(label, score)
+        # 从 hall_of_fame 补充 val_score > baseline 的候选
+        top_labels = {c["label"] for c in self._top_candidates}  # 刷新
+        for label, hof_entry in self._hall_of_fame.items():
+            if label in top_labels:
+                continue
+            val_s = hof_entry.get("val_score", 0)
+            if val_s > train_bl:
+                log.info(
+                    "[auto_accept] hall_of_fame %s val_score=%.2f > baseline=%.2f, adding to top-K",
+                    label,
+                    val_s,
+                    train_bl,
+                )
+                self._update_top_candidates(label, hof_entry.get("score", val_s))
 
     def _build_result(self) -> dict:
         # 自动补救: 将已 eval 但未 accept 的优质候选加入 top-K 池
@@ -1662,89 +1704,98 @@ class UnifiedOptimizerAgent:
         return {"count": len(artifacts), "artifacts": artifacts}
 
     def _commit_best_before_observe(self):
-        """新一轮 observe 前，用 val_set eval top-K 最优候选，提升则 commit 为新 base。"""
+        """新一轮 observe 前，用 val_set eval 所有 top-K 候选，最优且超 baseline 的 commit。"""
         if self._episode_counter == 0 or not self._top_candidates:
             return
-        best_cand = max(self._top_candidates, key=lambda c: c["score"])
-        best_label = best_cand["label"]
 
-        # 有 val_set 时，在候选沙盒中 eval 决定是否 commit
         if self.val_set:
-            # 直接从候选目录评估，不先 accept（避免污染 accepted snapshot）
-            candidate_dir = os.path.join(self.sandbox._candidates_dir, best_label)
-            if not os.path.isdir(candidate_dir):
-                self._top_candidates.clear()
-                self._candidate_scores.clear()
-                return
-            tmp_target = self.target_factory(candidate_dir)
-            val_details = []
-            val_error = None
-            try:
-                val_result = self.eval_fn(tmp_target, self.val_set)
-                val_score = val_result["score"]
-                val_score = val_score * 100 if val_score <= 1 else val_score
-                val_details = val_result.get("details", [])
-            except Exception as e:
-                log.warning("[Observe] val_set eval failed: %s", e)
-                val_score = 0.0
-                val_error = str(e)
-            val_detail_file = None
-            if val_details or val_error:
-                val_detail_payload = {}
-                if val_details:
-                    val_detail_payload["details"] = val_details
-                if val_error:
-                    val_detail_payload["error"] = val_error
-                val_detail_file = self._write_detail_file(
-                    f"validation_eval_step_{self._step_count}_{best_label}.json",
-                    val_detail_payload,
+            # Val eval 所有 top-K 候选，记录到 hall_of_fame
+            best_val_label = None
+            best_val_score = self._baseline_score
+            for cand in list(self._top_candidates):
+                label = cand["label"]
+                candidate_dir = os.path.join(self.sandbox._candidates_dir, label)
+                if not os.path.isdir(candidate_dir):
+                    continue
+                tmp_target = self.target_factory(candidate_dir)
+                val_details = []
+                val_error = None
+                try:
+                    val_result = self.eval_fn(tmp_target, self.val_set)
+                    val_score = val_result["score"]
+                    val_score = val_score * 100 if val_score <= 1 else val_score
+                    val_details = val_result.get("details", [])
+                except Exception as e:
+                    log.warning("[Observe] val_set eval failed for %s: %s", label, e)
+                    val_score = 0.0
+                    val_error = str(e)
+                # 写 detail 文件
+                val_detail_file = None
+                if val_details or val_error:
+                    val_detail_payload = {}
+                    if val_details:
+                        val_detail_payload["details"] = val_details
+                    if val_error:
+                        val_detail_payload["error"] = val_error
+                    val_detail_file = self._write_detail_file(
+                        f"validation_eval_step_{self._step_count}_{label}.json",
+                        val_detail_payload,
+                    )
+                self._push_history(
+                    {
+                        "action": "validation_eval",
+                        "step": self._step_count,
+                        "label": label,
+                        "dataset_split": "validation",
+                        "n_samples": len(self.val_set),
+                        "rationale": cand.get("rationale", ""),
+                        "ops": cand.get("ops", []),
+                        "train_score": round(cand["score"], 2),
+                        "baseline_score": round(self._baseline_score, 2),
+                        "val_score": round(val_score, 2),
+                        "accepted": val_score > self._baseline_score,
+                        "error": val_error,
+                        "detail_file": val_detail_file,
+                    }
                 )
-            self._push_history(
-                {
-                    "action": "validation_eval",
-                    "step": self._step_count,
-                    "label": best_label,
-                    "dataset_split": "validation",
-                    "n_samples": len(self.val_set),
-                    "rationale": best_cand.get("rationale", ""),
-                    "ops": best_cand.get("ops", []),
-                    "train_score": round(best_cand["score"], 2),
-                    "baseline_score": round(self._baseline_score, 2),
-                    "val_score": round(val_score, 2),
-                    "accepted": val_score > self._baseline_score,
-                    "error": val_error,
-                    "detail_file": val_detail_file,
-                }
-            )
-            print(
-                f"\n[Observe] Val eval candidate '{best_label}': "
-                f"val_score={val_score:.2f}, baseline={self._baseline_score:.2f}"
-            )
-            if val_score > self._baseline_score:
-                # 验证通过，正式 accept（会刷新 accepted snapshot）
-                self.sandbox.accept_candidate(best_label)
+                print(
+                    f"  [Observe] Val eval '{label}': "
+                    f"val={val_score:.2f}, train={cand['score']:.2f}, baseline={self._baseline_score:.2f}"
+                )
+                # 写入 hall_of_fame（附带 val_score）
+                hof_entry = dict(cand)
+                hof_entry["val_score"] = val_score
+                if label not in self._hall_of_fame or val_score > self._hall_of_fame[
+                    label
+                ].get("val_score", 0):
+                    self._hall_of_fame[label] = hof_entry
+                # 跟踪最优
+                if val_score > best_val_score:
+                    best_val_score = val_score
+                    best_val_label = label
+
+            if best_val_label:
+                self.sandbox.accept_candidate(best_val_label)
                 self.sys_desc.source_files = collect_sources(self.source_dir)
                 self._refresh_file_map()
                 self.target = self.target_factory(self.source_dir)
-                self._baseline_score = val_score
-                self._top_candidates.clear()
-                self._candidate_scores.clear()
+                self._baseline_score = best_val_score
                 self._source_version += 1
                 self._eval_result_cache.clear()
                 print(
-                    f"[Observe] Committed '{best_label}' "
-                    f"(val_score={val_score:.2f}) as new base"
+                    f"[Observe] Committed '{best_val_label}' "
+                    f"(val_score={best_val_score:.2f}) as new base"
                 )
             else:
-                # val 没提升，不 accept，accepted snapshot 不受影响
-                self._top_candidates.clear()
-                self._candidate_scores.clear()
                 print(
-                    f"[Observe] Rejected '{best_label}' "
-                    f"(val_score={val_score:.2f} <= baseline={self._baseline_score:.2f})"
+                    f"[Observe] No candidate beats val baseline ({self._baseline_score:.2f})"
                 )
+            self._top_candidates.clear()
+            self._candidate_scores.clear()
         else:
             # 无 val_set，退回 train score 决策
+            best_cand = max(self._top_candidates, key=lambda c: c["score"])
+            best_label = best_cand["label"]
             if best_cand["score"] <= self._baseline_score:
                 return
             self.sandbox.accept_candidate(best_label)
@@ -2569,6 +2620,11 @@ class UnifiedOptimizerAgent:
         # 按分数降序排序，保留 top-K
         self._top_candidates.sort(key=lambda c: c["score"], reverse=True)
         self._top_candidates = self._top_candidates[: self.top_k]
+        # 同步写入 hall_of_fame（跨轮持久记录）
+        if label not in self._hall_of_fame or score > self._hall_of_fame[label].get(
+            "score", 0
+        ):
+            self._hall_of_fame[label] = dict(entry)
 
     def _tool_eval_candidate(self, args: dict) -> dict:
         label = args["label"]

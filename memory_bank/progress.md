@@ -1,5 +1,23 @@
 # NOA Development Progress
 
+## 2026-03-15
+
+### 修复 L1 候选选拔逻辑 — hall_of_fame 持久候选记录
+
+**问题**: L1 在 val 上产生好候选（+22），但 test 只提升 +8.5。三个选拔缺陷导致好候选跨轮丢失：
+1. `_commit_best_before_observe` 只 val eval top-1，其余候选未验证
+2. top-K 按 train score 排序，方差大
+3. `_top_candidates` 每轮清空，前几轮好候选无法进入 final eval
+
+**方案**: `_hall_of_fame: dict[str, dict]` 跨轮持久记录（`unified_agent.py`）
+
+**改动**:
+- `__init__`: 新增 `_hall_of_fame` 字段
+- `_update_top_candidates`: 同步写入 hall_of_fame
+- `_commit_best_before_observe`: val eval 所有 top-K 候选（不再只 top-1），每个写入 hall_of_fame
+- `_final_eval_top_candidates`: 开头从 hall_of_fame 恢复磁盘上仍存在的候选，按 val_score 优先排序
+- `_auto_accept_unadded_candidates`: 额外从 hall_of_fame 补充 val_score > baseline 的候选
+
 ## 2026-03-13
 
 ### Review 修复: 4 个正确性回归
