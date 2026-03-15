@@ -1,54 +1,70 @@
 {
-  "final_score": 78.01,
-  "baseline_score": 69.0,
+  "final_score": 44.5,
+  "baseline_score": 36.0,
   "rounds": [
     {
       "round": 0,
       "l1_result": {
-        "final_score": 78.01,
-        "baseline_score": 69.0,
-        "iterations": 28,
-        "accepted": 0,
+        "final_score": 44.5,
+        "baseline_score": 36.0,
+        "iterations": 9,
+        "accepted": 1,
         "history": [
+          {
+            "action": "baseline_eval",
+            "step": 0,
+            "label": "baseline",
+            "dataset_split": "test",
+            "score": 36.0,
+            "n_samples": 200
+          },
+          {
+            "action": "baseline_eval",
+            "step": 0,
+            "label": "baseline",
+            "dataset_split": "validation",
+            "score": 42.0,
+            "n_samples": 50
+          },
           {
             "action": "observe",
             "step": 1,
             "episode_id": "ep_1",
             "n_trajectories": 10,
-            "mean_f1": 70.0
+            "mean_f1": 20.0
           },
           {
             "action": "analyze",
             "step": 2,
             "patterns": [
               {
-                "pattern": "Time from ER to surgery is not a significant predictor of complications",
-                "root_cause": "",
-                "affected_file": "",
-                "severity": "medium"
+                "pattern": "Empty answer with finish_reason='length' and tokens_used=max_tokens",
+                "root_cause": "The ProblemSolver component has max_tokens=2048 which is insufficient when the ContextAnalyst produces a long summary. The model consumes tokens for the system prompt, template, question, and summary, leaving no room to generate the actual yes/no/maybe answer. The model hits the token limit and returns an empty response.",
+                "affected_file": "config.py",
+                "severity": "high"
               },
               {
-                "pattern": "ProblemSolver over-conservative reasoning with 'possible' causality ratings",
-                "root_cause": "The ProblemSolver component receives a summary indicating 'possible' causality (87.5% of cases) and concludes 'maybe' due to over-analysis of limitations (small sample size, pre-existing conditions), failing to recognize that 'possible' causality in pharmacovigilance context supports 'yes' for risk factor identification. The prompt lacks guidance on interpreting causality algorithm ratings.",
+                "pattern": "context_truncation_cascade_failure",
+                "root_cause": "When input context is truncated (marked as '(ABSTRACT TRUNCATED)'), the ContextAnalyst correctly identifies that the context is insufficient to answer, but this uncertainty signal is not properly propagated to or respected by the ProblemSolver, which may hallucinate an incorrect answer or produce inconsistent outputs",
+                "affected_file": "components.py",
+                "severity": "high"
+              },
+              {
+                "pattern": "ProblemSolver hits max_tokens limit (finish_reason='length') when processing detailed summaries from ContextAnalyst",
+                "root_cause": "The ProblemSolver's prompt template ('You are supposed to provide a solution...') is too open-ended, causing the model to generate verbose explanations before the required 'Answer: yes/no/maybe' format. When ContextAnalyst produces a detailed summary (1381 tokens), the ProblemSolver attempts to elaborate extensively and exceeds the 2048 token limit before producing the final answer line.",
                 "affected_file": "prompts.py",
                 "severity": "high"
               },
               {
-                "pattern": "No significant difference in perforation rates across timing groups",
-                "root_cause": "",
-                "affected_file": "",
-                "severity": "medium"
-              },
-              {
-                "pattern": "ProblemSolver over-analyzes nuanced evidence and fails to apply majority-rule heuristic for binary satisfaction questions",
-                "root_cause": "The ProblemSolver component over-weights minority dissent (35% dissatisfied) and conditional factors (severity-dependence) against the clear majority outcome (65% satisfied), treating balanced nuanced evidence as requiring a hedged 'maybe' answer rather than recognizing the majority 'yes'",
-                "affected_file": "",
+                "pattern": "ContextAnalyst produces empty output with finish_reason='length' when context is significantly longer than question",
+                "root_cause": "The prompt template concatenates context and question in a way that causes the model to enter a generation loop when the context is much longer than the question, consuming all available tokens without producing meaningful output",
+                "affected_file": "components.py",
                 "severity": "high"
               },
               {
-                "pattern": "Answer extraction regex matches first yes/no/maybe occurrence instead of final answer",
-                "root_cause": "The extract_answer_yesno function in evaluate.py uses re.search with pattern (?i)\\b(yes|no|maybe)\\b which returns the FIRST match in the text. When the model output contains yes/no/maybe in the reasoning body before the final 'Answer: yes', the extraction returns the wrong value. The pattern should match the formatted answer line or use re.findall and take the last match.",
-                "affected_file": "evaluate.py",
+                "pattern": "Empty output with finish_reason='length' despite empty intermediate input from upstream",
+                "root_cause": "ProblemSolver inherits the same insufficient max_tokens=2048 configuration. Even with empty summary input, the combined prompt (system + template + question + format instructions) consumes the full token budget.",
+                "affected_file": "config.py",
                 "severity": "high"
               }
             ]
@@ -56,855 +72,551 @@
           {
             "action": "checkpoint_candidate",
             "step": 2,
-            "label": "fix_answer_extraction_regex",
+            "label": "cand_increase_max_tokens",
             "ok": true,
-            "rationale": "Fix the answer extraction regex to match the formatted 'Answer: yes/no/maybe' line first, and if not found, take the last occurrence of yes/no/maybe instead of the first. This prevents incorrect extraction when the model mentions yes/no/maybe in its reasoning before the final answer.",
+            "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
             "ops": [
               {
                 "op": "update",
-                "file_path": "evaluate.py",
-                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
               }
             ],
-            "detail_file": ".noa_meta/checkpoint_fix_answer_extraction_regex.json"
-          },
-          {
-            "action": "accept_candidate",
-            "label": "fix_answer_extraction_regex",
-            "step": 2,
-            "rationale": "Fix the answer extraction regex to match the formatted 'Answer: yes/no/maybe' line first, and if not found, take the last occurrence of yes/no/maybe instead of the first. This prevents incorrect extraction when the model mentions yes/no/maybe in its reasoning before the final answer.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "evaluate.py",
-                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-              }
-            ],
-            "score": 70.01,
-            "skip_eval": true,
-            "skip_eval_reason": "This is a clear deterministic bug fix: the original regex used re.search which returns the FIRST match of yes/no/maybe in the text, but the model output format specifies 'Answer: yes/no/maybe' at the end. The fix first tries to match the explicit 'Answer: ' format, and falls back to taking the LAST occurrence instead of the first. This is a logic correction that doesn't need behavioral evaluation."
+            "analysis_round": 1,
+            "detail_file": ".noa_meta/checkpoint_cand_increase_max_tokens.json"
           },
           {
             "action": "checkpoint_candidate",
             "step": 2,
-            "label": "improve_problem_solver_prompt",
+            "label": "cand_improve_solver_prompt",
             "ok": true,
-            "rationale": "Improve ProblemSolver prompt to address over-conservative reasoning. The current prompt is too generic and doesn't guide the model on how to interpret medical evidence summaries. The new prompt specifically addresses: 1) Majority-rule heuristic for binary questions, 2) Proper interpretation of 'poss",
+            "rationale": "Make ProblemSolver prompt more directive and concise to reduce verbosity and prevent hitting max_tokens limit",
             "ops": [
               {
                 "op": "update",
                 "file_path": "prompts.py",
                 "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
+                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical expert. Based on the provided summary, answer the question"
               }
             ],
-            "detail_file": ".noa_meta/checkpoint_improve_problem_solver_prompt.json"
+            "analysis_round": 1,
+            "detail_file": ".noa_meta/checkpoint_cand_improve_solver_prompt.json"
+          },
+          {
+            "action": "checkpoint_candidate",
+            "step": 2,
+            "label": "cand_improve_analyst_prompt",
+            "ok": true,
+            "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+                "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+              }
+            ],
+            "analysis_round": 1,
+            "detail_file": ".noa_meta/checkpoint_cand_improve_analyst_prompt.json"
           },
           {
             "action": "eval_candidate",
             "step": 3,
-            "label": "improve_problem_solver_prompt",
-            "mode": "full",
-            "rationale": "Improve ProblemSolver prompt to address over-conservative reasoning. The current prompt is too generic and doesn't guide the model on how to interpret medical evidence summaries. The new prompt specifically addresses: 1) Majority-rule heuristic for binary questions, 2) Proper interpretation of 'possible' causality in pharmacovigilance, 3) Avoiding over-analysis of limitations when main findings are clear.",
+            "label": "cand_improve_solver_prompt",
+            "mode": "batch",
+            "rationale": "Make ProblemSolver prompt more directive and concise to reduce verbosity and prevent hitting max_tokens limit",
             "ops": [
               {
                 "op": "update",
                 "file_path": "prompts.py",
                 "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
+                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical expert. Based on the provided summary, answer the question"
               }
             ],
-            "before_score": 70.0,
-            "after_score": 80.0,
+            "before_score": 20.0,
+            "after_score": 0.0,
+            "accepted": false,
+            "error": "attempted relative import with no known parent package"
+          },
+          {
+            "action": "eval_candidate",
+            "step": 3,
+            "label": "cand_improve_analyst_prompt",
+            "mode": "batch",
+            "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+                "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+              }
+            ],
+            "before_score": 20.0,
+            "after_score": 30.0,
             "accepted": true,
-            "details_count": 10,
+            "error": null
+          },
+          {
+            "action": "eval_candidate",
+            "step": 3,
+            "label": "cand_increase_max_tokens",
+            "mode": "batch",
+            "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+              }
+            ],
+            "before_score": 20.0,
+            "after_score": 60.0,
+            "accepted": true,
             "error": null
           },
           {
             "action": "accept_candidate",
-            "label": "improve_problem_solver_prompt",
+            "label": "cand_increase_max_tokens",
             "step": 3,
-            "rationale": "Improve ProblemSolver prompt to address over-conservative reasoning. The current prompt is too generic and doesn't guide the model on how to interpret medical evidence summaries. The new prompt specifically addresses: 1) Majority-rule heuristic for binary questions, 2) Proper interpretation of 'possible' causality in pharmacovigilance, 3) Avoiding over-analysis of limitations when main findings are clear.",
+            "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+              }
+            ],
+            "score": 60.0
+          },
+          {
+            "action": "accept_candidate",
+            "label": "cand_improve_analyst_prompt",
+            "step": 3,
+            "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
             "ops": [
               {
                 "op": "update",
                 "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
+                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+                "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
               }
             ],
-            "score": 80.0
+            "score": 30.0
+          },
+          {
+            "action": "merge_candidates",
+            "step": 3,
+            "label": "cand_merged_v1",
+            "source_labels": [
+              "cand_increase_max_tokens",
+              "cand_improve_analyst_prompt"
+            ],
+            "ok": true,
+            "conflicts": []
+          },
+          {
+            "action": "eval_candidate",
+            "step": 4,
+            "label": "cand_merged_v1",
+            "mode": "full",
+            "dataset_split": "train",
+            "n_samples": 10,
+            "rationale": "Merged from cand_increase_max_tokens, cand_improve_analyst_prompt: [cand_increase_max_tokens] Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit; [cand_improve_analyst_prompt] Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+              },
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+                "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+              }
+            ],
+            "before_score": 20.0,
+            "after_score": 0.0,
+            "accepted": false,
+            "details_count": 10,
+            "error": null,
+            "detail_file": ".noa_meta/eval_cand_merged_v1.json"
+          },
+          {
+            "action": "eval_candidate",
+            "step": 5,
+            "label": "cand_merged_v1",
+            "mode": "full",
+            "dataset_split": "train",
+            "n_samples": 10,
+            "rationale": "Merged from cand_increase_max_tokens, cand_improve_analyst_prompt: [cand_increase_max_tokens] Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit; [cand_improve_analyst_prompt] Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+              },
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+                "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+              }
+            ],
+            "before_score": 20.0,
+            "after_score": 20.0,
+            "accepted": false,
+            "details_count": 10,
+            "error": null,
+            "detail_file": ".noa_meta/eval_cand_merged_v1.json"
+          },
+          {
+            "action": "validation_eval",
+            "step": 6,
+            "label": "cand_increase_max_tokens",
+            "dataset_split": "validation",
+            "n_samples": 50,
+            "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+                "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+              }
+            ],
+            "train_score": 60.0,
+            "baseline_score": 42.0,
+            "val_score": 48.0,
+            "accepted": true,
+            "error": null,
+            "detail_file": ".noa_meta/validation_eval_step_6_cand_increase_max_tokens.json"
           },
           {
             "action": "observe",
-            "step": 4,
+            "step": 6,
             "episode_id": "ep_2",
             "n_trajectories": 10,
-            "mean_f1": 70.0
+            "mean_f1": 50.0
           },
           {
             "action": "analyze",
-            "step": 5,
+            "step": 7,
             "patterns": [
               {
-                "pattern": "Model generates verbose markdown-formatted reasoning with headers and bullet points before the final answer line, causing potential misalignment between intended output format and actual generation",
-                "root_cause": "The ProblemSolver prompt template uses 'Always conclude the last line of your response should be of the following format' which is interpreted by the model as permission to generate extensive explanatory content before the final answer. The instruction 'conclude' implies the format should appear at the end, but doesn't constrain the model to be concise. This leads to verbose outputs with markdown headers, numbered lists, and detailed reasoning that may contain the words 'yes', 'no', or 'maybe' in explanatory contexts before the actual answer line.",
-                "affected_file": "prompts.py",
-                "severity": "medium"
+                "pattern": "Empty output with finish_reason='length' and tokens_used=max_tokens",
+                "root_cause": "The ContextAnalyst component has max_tokens=2048 which is insufficient for long input contexts. When the input context is very long, the model consumes all available tokens processing the input and has no remaining tokens to generate the summary output.",
+                "affected_file": "config.py",
+                "severity": "high"
               },
               {
-                "pattern": "ProblemSolver outputs 'maybe' despite clear evidence supporting 'yes' and explicit prompt guidelines stating 'possible' causality supports 'yes'",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains guidelines that are not being enforced effectively. The model generates analysis that contradicts explicit instructions: it over-analyzes limitations (sample size, pre-existing conditions) that the prompt explicitly says to ignore, and fails to apply the rule that 'possible' causality in pharmacovigilance supports 'yes'. The guidelines are present but lack sufficient weight or structural enforcement in the prompt.",
+                "pattern": "ProblemSolver outputs verbose explanatory text with embedded 'no' in multiple places before final answer, causing regex extraction ambiguity",
+                "root_cause": "The FORMAT_YESNO prompt has malformed syntax (unclosed parentheses, mixed quotes in prompts.py) and fails to enforce concise output format. The model generates lengthy analysis containing 'no' multiple times (e.g., 'no statistically significant difference', 'no evidence'), making simple regex extraction unreliable even though final answer is correct",
                 "affected_file": "prompts.py",
                 "severity": "high"
               },
               {
-                "pattern": "ProblemSolver outputs 'maybe' despite clear majority (>50%) evidence in summary",
-                "root_cause": "The ProblemSolver component over-analyzes limitations and caveats in the summary (35% dissatisfaction, severity dependency) instead of strictly following the >50% majority rule. The prompt guidelines are not being enforced effectively by the model.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "Answer extraction regex finds first occurrence of yes/no/maybe anywhere in text, which may match explanatory content rather than the intended final answer",
-                "root_cause": "The extract_answer_yesno function in evaluate.py uses pattern `(?i)\\b(yes|no|maybe)\\b` which searches the entire text for the first word-boundary-delimited match of yes/no/maybe. In verbose model outputs containing explanatory sentences like 'this suggests yes is appropriate' or 'the answer indicates yes', the regex extracts from explanatory text rather than the structured 'Answer: yes' line at the end. This creates brittleness when models generate verbose responses.",
+                "pattern": "F1=1.00 labeled as failure despite correct extraction",
+                "root_cause": "The evaluation metric shows F1=1.00 (perfect match) but sample is incorrectly labeled as [FAIL] in trajectory. The verbose output format with 'Answer: yes' at the end is correctly handled by extract_answer_yesno() regex pattern, but the trajectory labeling logic may have a bug where it misclassifies successful predictions as failures.",
                 "affected_file": "evaluate.py",
                 "severity": "high"
               },
               {
-                "pattern": "Inconsistent yes/no/maybe classification due to ambiguous prompt guidelines causing non-deterministic outputs even with temperature=0.0",
-                "root_cause": "The PROBLEM_SOLVER prompt provides conflicting guidance: it asks for yes/no/maybe classification but the guidelines create ambiguity about when to use 'maybe' vs definitive answers. The prompt states 'Only answer maybe when evidence is truly balanced or insufficient' but the evidence in this case (non-significant P-values, trends without confirmation) can be interpreted as either 'insufficient' (suggesting maybe) or 'not accurate predictors' (suggesting no). This leads to inconsistent outputs across runs.",
-                "affected_file": "prompts.py",
+                "pattern": "LLM execution components (ContextAnalyst, ProblemSolver) report finish_reason='length' with tokens_used=2048 but null/empty text outputs in trajectory",
+                "root_cause": "Prompt token consumption equals max_tokens limit leaving zero completion budget, compounded by malformed prompt template syntax (unclosed f-strings, improper escaping) causing token explosion; response parsing fails to extract text from truncated responses [NOTE: Originally referenced 'components/__init__.py' which is outside writable scope]",
+                "affected_file": "",
                 "severity": "high"
+              },
+              {
+                "pattern": "Model outputs explanatory text containing yes/no/maybe before the final answer line, causing regex extraction to potentially match wrong instance",
+                "root_cause": "The extract_answer_yesno function uses regex to find the first occurrence of yes/no/maybe in the text, but the ProblemSolver model generates detailed explanations that may contain these words before the final 'Answer: yes' line. While the current sample doesn't show this, the pattern is fragile - if the model says 'there is yes correlation' or similar, extraction would fail.",
+                "affected_file": "evaluate.py",
+                "severity": "medium"
               }
             ]
           },
           {
             "action": "checkpoint_candidate",
-            "step": 5,
-            "label": "stronger_problem_solver_prompt",
-            "ok": true,
-            "rationale": "Strengthen ProblemSolver prompt with MUST/DO NOT language to enforce decision rules more strictly. Add explicit output format instructions to prevent verbose markdown-formatted responses. Prioritize rules: majority >50% → definitive answer, 'possible' causality → 'yes', limitations cannot override c",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_stronger_problem_solver_prompt.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 6,
-            "label": "stronger_problem_solver_prompt",
-            "mode": "full",
-            "rationale": "Strengthen ProblemSolver prompt with MUST/DO NOT language to enforce decision rules more strictly. Add explicit output format instructions to prevent verbose markdown-formatted responses. Prioritize rules: majority >50% → definitive answer, 'possible' causality → 'yes', limitations cannot override clear findings.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
-              }
-            ],
-            "before_score": 70.0,
-            "after_score": 80.0,
-            "accepted": true,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "accept_candidate",
-            "label": "stronger_problem_solver_prompt",
-            "step": 6,
-            "rationale": "Strengthen ProblemSolver prompt with MUST/DO NOT language to enforce decision rules more strictly. Add explicit output format instructions to prevent verbose markdown-formatted responses. Prioritize rules: majority >50% → definitive answer, 'possible' causality → 'yes', limitations cannot override clear findings.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc"
-              }
-            ],
-            "score": 80.0
-          },
-          {
-            "action": "observe",
             "step": 7,
-            "episode_id": "ep_3",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
+            "label": "cand_increase_analyst_tokens",
+            "ok": true,
+            "rationale": "Increase ContextAnalyst max_tokens from 2048 to 4096 to handle long input contexts that were causing empty outputs due to token exhaustion",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "config.py",
+                "search": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       ",
+                "replace": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       "
+              }
+            ],
+            "analysis_round": 2,
+            "detail_file": ".noa_meta/checkpoint_cand_increase_analyst_tokens.json"
           },
           {
-            "action": "analyze",
+            "action": "checkpoint_candidate",
+            "step": 7,
+            "label": "cand_improve_extraction",
+            "ok": true,
+            "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "evaluate.py",
+                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+              }
+            ],
+            "analysis_round": 2,
+            "detail_file": ".noa_meta/checkpoint_cand_improve_extraction.json"
+          },
+          {
+            "action": "checkpoint_candidate",
+            "step": 7,
+            "label": "cand_improve_format_prompt",
+            "ok": true,
+            "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+                "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
+              }
+            ],
+            "analysis_round": 2,
+            "detail_file": ".noa_meta/checkpoint_cand_improve_format_prompt.json"
+          },
+          {
+            "action": "eval_candidate",
             "step": 8,
-            "patterns": [
-              {
-                "pattern": "ProblemSolver outputs verbose analysis with markdown headers, bullet points, and step-by-step reasoning despite explicit one-line output constraint",
-                "root_cause": "The PROBLEM_SOLVER prompt structure places extensive DECISION RULES (analytical guidelines) before OUTPUT FORMAT instructions, causing the model to prioritize reasoning over format compliance. The instruction 'Provide ONLY the final answer line' is insufficiently enforced when preceded by detailed analytical guidance that primes the model to explain its reasoning.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite >50% 'possible' causality ratings in pharmacovigilance context, ignoring explicit DECISION RULE #2 which mandates 'yes' for 'possible'/'probable'/'definite' causality",
-                "root_cause": "The ProblemSolver prompt contains DECISION RULES (specifically Rule 2: 'possible' causality indicates VALID association → MUST answer 'yes') but the model fails to follow these imperative rules. Instead, it performs open-ended reasoning that weighs limitations against evidence, producing hedged 'maybe' conclusions. The prompt structure presents rules as guidelines rather than enforced constraints, and lacks few-shot examples demonstrating correct rule application.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver fails to apply Rule 1 (>50% threshold) when summary contains conflicting or nuanced information",
-                "root_cause": "The LLM over-analyzes nuanced information and ignores the explicit Rule 1 instruction to answer 'yes' when >50% of evidence is positive, instead outputting 'maybe' when it sees contradictory signals",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose markdown output despite strict format instructions",
-                "root_cause": "The PROBLEM_SOLVER prompt contains redundant and potentially conflicting format instructions. The FORMAT_YESNO string appended to the prompt duplicates format requirements already present in PROBLEM_SOLVER, creating confusion. Additionally, the ContextAnalyst's markdown-formatted output (with headers like '# Summary') may prime the ProblemSolver to also use markdown formatting, overriding the 'no headers/bullet points' rule.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores explicit decision rules when 'possible' causality is present, over-analyzing limitations instead of following rule priority",
-                "root_cause": "The ProblemSolver prompt contains clear priority rules stating that 'possible' causality in pharmacovigilance context MUST yield 'yes' (Rule 2) and >50% consensus MUST yield definitive answer (Rule 1). However, the model contradicts these rules by fixating on the word 'possible' as uncertainty rather than as a valid association indicator, and allows study limitations to override the majority finding despite Rule 3 explicitly prohibiting this.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "observe",
-            "step": 9,
-            "episode_id": "ep_4",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 10,
-            "patterns": [
-              {
-                "pattern": "ProblemSolver ignores explicit decision rules in prompt when >50% consensus exists",
-                "root_cause": "The ProblemSolver prompt contains explicit DECISION RULES with 'MUST' directives (Rule 1: >50% agreement → MUST answer yes/no), but the model claude-haiku-4-5-20251001 fails to follow these rules. Instead, it provides nuanced analysis and outputs 'maybe' despite 65% satisfaction rate clearly meeting the >50% threshold for a definitive 'yes' answer. The model prioritizes its own reasoning over the explicit rule-based constraints in the prompt.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose analysis despite strict formatting instructions",
-                "root_cause": "The PROBLEM_SOLVER prompt contains explicit instructions ('Provide ONLY the final answer line', 'Do NOT include explanations', 'Your entire response must be exactly one line') but the model ignores them and outputs multi-line analysis with headers, bullet points, and reasoning before the final answer. The FORMAT_YESNO prompt is appended but insufficient to constrain output format.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores Decision Rule 2: 'possible' causality in pharmacovigilance should yield 'yes' not 'maybe'",
-                "root_cause": "The ProblemSolver prompt contains structured decision rules that the model (claude-haiku-4-5-20251001) fails to follow. Despite explicit Rule 2 stating that 'possible' causality in pharmacovigilance context indicates a VALID association requiring 'yes' answer, the model treats 'possible' as uncertainty and outputs 'maybe'. The model prioritizes its own reasoning over the explicit rules in the prompt.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver produces verbose output with markdown headers, numbered reasoning steps, and explanations despite strict format instructions requiring only a single answer line",
-                "root_cause": "The PROBLEM_SOLVER prompt in prompts.py contains detailed DECISION RULES with numbered items and reasoning instructions before the OUTPUT FORMAT section. This creates conflicting signals - the model follows the structured reasoning pattern from DECISION RULES while ignoring the subsequent OUTPUT FORMAT constraints. The verbose ContextAnalyst output (also containing headers and structured reasoning) may reinforce this behavior when passed as input to ProblemSolver.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver produces verbose markdown-formatted output with explanations when input summary contains markdown formatting",
-                "root_cause": "The ProblemSolver prompt does not sufficiently constrain the model to produce only the required single-line answer format. When the ContextAnalyst summary contains markdown headers and formatting (## Key Finding, **bold**, etc.), the ProblemSolver model mirrors this style and generates verbose explanatory text with markdown formatting instead of the strict 'Answer: X' format required.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 10,
-            "label": "fix_both_prompts",
-            "ok": true,
-            "rationale": "Fix both ContextAnalyst and ProblemSolver prompts. ContextAnalyst now generates plain text without markdown formatting. ProblemSolver prompt is simplified with clearer rules and stronger format enforcement to reduce verbose output and improve rule adherence.",
+            "label": "cand_increase_analyst_tokens",
+            "mode": "batch",
+            "rationale": "Increase ContextAnalyst max_tokens from 2048 to 4096 to handle long input contexts that were causing empty outputs due to token exhaustion",
             "ops": [
               {
                 "op": "update",
-                "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_fix_both_prompts.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 11,
-            "label": "fix_both_prompts",
-            "mode": "full",
-            "rationale": "Fix both ContextAnalyst and ProblemSolver prompts. ContextAnalyst now generates plain text without markdown formatting. ProblemSolver prompt is simplified with clearer rules and stronger format enforcement to reduce verbose output and improve rule adherence.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou"
-              }
-            ],
-            "before_score": 80.0,
-            "after_score": 90.0,
-            "accepted": true,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "accept_candidate",
-            "label": "fix_both_prompts",
-            "step": 11,
-            "rationale": "Fix both ContextAnalyst and ProblemSolver prompts. ContextAnalyst now generates plain text without markdown formatting. ProblemSolver prompt is simplified with clearer rules and stronger format enforcement to reduce verbose output and improve rule adherence.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary of evidenc",
-                "replace": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou"
-              }
-            ],
-            "score": 90.0
-          },
-          {
-            "action": "observe",
-            "step": 12,
-            "episode_id": "ep_5",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 13,
-            "patterns": [
-              {
-                "pattern": "ProblemSolver outputs 'maybe' when context indicates 'possible' causality, despite explicit rule that 'Possible'/'probable' causality means YES",
-                "root_cause": "The PROBLEM_SOLVER prompt template in prompts.py contains contradictory instructions. It states 'output ONLY' and 'exactly ONE LINE' but then FORMAT_YESNO is appended which allows for analysis before the final answer line. This contradiction causes the model (claude-haiku-4-5-20251001) to ignore the critical rule that 'possible'/'probable' causality means YES, and instead generate a lengthy balanced analysis that concludes with 'maybe' due to perceived uncertainty in the evidence.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite >50% evidence due to contradictory prompt instructions",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains conflicting directives: it asks for detailed analysis reasoning, then says 'output ONLY' three options, but also says 'entire response must be exactly ONE LINE'. This confusion causes the model to provide lengthy analysis and hedge with 'maybe' based on minority dissent (35%), ignoring the explicit >50% agreement rule.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose markdown analysis with formatted answer (**yes**) instead of concise 'Answer: yes' format",
-                "root_cause": "PROBLEM_SOLVER prompt contains conflicting instructions - 'output ONLY' directive is undermined by detailed explanatory rules that encourage analytical reasoning, and FORMAT_YESNO doesn't explicitly forbid markdown formatting around the answer value",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose markdown output despite 'ONLY' and 'ONE LINE' constraints in prompt",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains weak format enforcement. The model (claude-haiku-4-5-20251001) ignores 'output ONLY' and 'exactly ONE LINE' instructions, generating multi-line markdown explanations with headers. The prompt's 'CRITICAL' section and format rules are insufficient to override the model's tendency to provide explanatory reasoning.",
-                "affected_file": "prompts.py",
-                "severity": "medium"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose markdown analysis with headers, bullet points, and explanatory text before the final answer line",
-                "root_cause": "The PROBLEM_SOLVER prompt template in prompts.py uses 'output ONLY' language but does not strictly enforce no-analysis output. The FORMAT_YESNO instruction says 'conclude the last line' which implicitly permits content before the answer. The model interprets this as license to provide detailed analysis followed by the formatted answer line.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 13,
-            "label": "remove_format_yesno",
-            "ok": true,
-            "rationale": "Remove FORMAT_YESNO from ProblemSolver prompt construction. The FORMAT_YESNO says 'conclude the last line' which implicitly allows content before the answer, causing verbose output. The PROBLEM_SOLVER template already contains strict format instructions.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "components.py",
-                "search": "        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f'Problem:\\n\"{questi",
-                "replace": "        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f'Problem:\\n\"{questi"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_remove_format_yesno.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 14,
-            "label": "remove_format_yesno",
-            "mode": "full",
-            "rationale": "Remove FORMAT_YESNO from ProblemSolver prompt construction. The FORMAT_YESNO says 'conclude the last line' which implicitly allows content before the answer, causing verbose output. The PROBLEM_SOLVER template already contains strict format instructions.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "components.py",
-                "search": "        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f'Problem:\\n\"{questi",
-                "replace": "        prompt = (\n            f\"{self.config.prompt_template}\\n\\n\"\n            f'Problem:\\n\"{questi"
-              }
-            ],
-            "before_score": 90.0,
-            "after_score": 70.0,
-            "accepted": false,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 14,
-            "label": "strict_format_yesno",
-            "ok": true,
-            "rationale": "Make FORMAT_YESNO stricter by explicitly forbidding any other text or explanations, and removing the 'conclude the last line' language that allows content before the answer.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
-                "replace": "FORMAT_YESNO = (\n    \"Your response must be ONLY this exact text: 'Answer: yes' or 'Answer: no' or '"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_strict_format_yesno.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 15,
-            "label": "strict_format_yesno",
-            "mode": "full",
-            "rationale": "Make FORMAT_YESNO stricter by explicitly forbidding any other text or explanations, and removing the 'conclude the last line' language that allows content before the answer.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
-                "replace": "FORMAT_YESNO = (\n    \"Your response must be ONLY this exact text: 'Answer: yes' or 'Answer: no' or '"
-              }
-            ],
-            "before_score": 90.0,
-            "after_score": 90.0,
-            "accepted": false,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "observe",
-            "step": 16,
-            "episode_id": "ep_6",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 17,
-            "patterns": [
-              {
-                "pattern": "ProblemSolver generates verbose markdown analysis instead of single-line answer",
-                "root_cause": "The PROBLEM_SOLVER prompt contains conflicting instructions - it says 'output ONLY' and 'exactly ONE LINE' but also includes explanatory text and rules that the model interprets as permission to provide reasoning. The model ignores the format constraint and outputs multi-line markdown analysis.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ContextAnalyst outputs markdown headers despite 'plain text without markdown' instruction",
-                "root_cause": "The CONTEXT_ANALYST prompt requests 'plain text summary without markdown formatting' but the model generates markdown headers (##) and bullet points. The instruction is not strong enough to override the model's default formatting behavior.",
-                "affected_file": "prompts.py",
-                "severity": "medium"
-              },
-              {
-                "pattern": "Model outputs verbose markdown-formatted responses despite explicit 'ONLY' and 'exactly ONE LINE' constraints in prompt",
-                "root_cause": "The ProblemSolver prompt contains explicit formatting constraints ('output ONLY', 'exactly ONE LINE', 'entire response must be exactly ONE LINE') but the model ignores them and outputs multi-paragraph markdown responses with headers, bold text, and reasoning. The prompt lacks sufficient enforcement mechanisms.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' for 'possible' causality despite explicit rule stating 'Possible'/'probable' causality means YES",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains verbose reasoning instructions that conflict with the direct answer rule. The model generates extensive analysis with 'Limitations and Caveats' section before concluding, effectively ignoring the rule that 'Possible' causality should map to YES. The prompt structure allows the model to overthink and second-guess despite clear guidelines.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores explicit prompt rules about 'possible' causality meaning YES",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains explicit rules stating \"'Possible'/'probable' causality means YES (not maybe)\", but the model overrides this rule with its own reasoning about limitations and sample size. The model generates verbose analysis that contradicts the explicit instruction, concluding 'maybe' despite 87.5% 'possible' causality ratings which should map to 'yes' per the rules.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 17,
-            "label": "minimal_prompts",
-            "ok": true,
-            "rationale": "Make both SYSTEM_PROMPT and PROBLEM_SOLVER extremely minimal and direct. Remove all language that could encourage verbose analysis. The system prompt now explicitly forbids explanations. The problem solver prompt is stripped to bare essentials with clear rules and format.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "SYSTEM_PROMPT = \"You are a scientist.\"",
-                "replace": "SYSTEM_PROMPT = \"You are a concise assistant that follows instructions exactly. Never add explanatio"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou",
-                "replace": "PROBLEM_SOLVER = (\n    \"Answer the question based on the summary.\\n\"\n    \"Rules: >50% agreement → ye"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_minimal_prompts.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 18,
-            "label": "minimal_prompts",
-            "mode": "full",
-            "rationale": "Make both SYSTEM_PROMPT and PROBLEM_SOLVER extremely minimal and direct. Remove all language that could encourage verbose analysis. The system prompt now explicitly forbids explanations. The problem solver prompt is stripped to bare essentials with clear rules and format.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "SYSTEM_PROMPT = \"You are a scientist.\"",
-                "replace": "SYSTEM_PROMPT = \"You are a concise assistant that follows instructions exactly. Never add explanatio"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou",
-                "replace": "PROBLEM_SOLVER = (\n    \"Answer the question based on the summary.\\n\"\n    \"Rules: >50% agreement → ye"
+                "file_path": "config.py",
+                "search": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       ",
+                "replace": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       "
               }
             ],
             "before_score": 40.0,
-            "after_score": 50.0,
-            "accepted": true,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "observe",
-            "step": 19,
-            "episode_id": "ep_7",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 20,
-            "patterns": [
-              {
-                "pattern": "Model outputs verbose markdown-formatted reasoning with multiple sections instead of single-line answer format",
-                "root_cause": "The PROBLEM_SOLVER prompt contains formatting instructions ('output ONLY', 'exactly ONE LINE') but these constraints are insufficient to prevent the model from generating elaborate reasoning with markdown headers. The model interprets the task as requiring detailed analysis before the final answer, despite explicit instructions to output only the answer line.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores explicit classification rules when summary contains uncertainty qualifiers like 'possible', outputting 'maybe' despite rules stating 'Possible/probable causality means YES'",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains conflicting instructions: explicit classification rules define 'possible'→YES, but the analytical framing ('You are a medical research analyst') and detailed rule explanations encourage the model to perform its own risk-benefit analysis. The model prioritizes nuanced medical reasoning over strict rule adherence, causing it to output 'maybe' when it identifies limitations or confounding factors, even when the rules explicitly state 'possible' causality should yield YES.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite clear majority (>50%) satisfaction evidence",
-                "root_cause": "The PROBLEM_SOLVER prompt contains conflicting guidance - it states '>50% agreement → answer yes or no' but the model is swayed by the mention of minority dissatisfaction (35%) in the summary. The prompt lacks explicit instruction to ignore minority dissent when majority threshold is met.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ContextAnalyst generates verbose markdown-formatted summaries despite prompt instruction for plain text, causing ProblemSolver to ignore 'possible=YES' rule",
-                "root_cause": "The ContextAnalyst prompt requests 'plain text summary without markdown formatting, headers, or bullet points' but the model outputs structured markdown with headers (## Key Findings), bold text, and bullet points. This verbose format includes 'Limitations' sections that the ProblemSolver incorrectly weighs more heavily than the explicit rule stating 'Possible causality means YES'. The ProblemSolver sees mixed signals (87.5% possible causality vs 'small sample size' limitations) and defaults to conservative 'maybe' despite the rule.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver prompt contains contradictory signals - explicit rule says 'possible=YES' but example output shows 'maybe' reasoning pattern",
-                "root_cause": "The PROBLEM_SOLVER prompt includes an example ending with 'Answer: yes' but the actual model behavior shows it generates extensive reasoning with 'Conclusion' sections that weigh limitations equally with evidence. The prompt structure allows the model to override the explicit 'possible=YES' rule when it sees uncertainty markers in the input summary. The FORMAT_YESNO appendix is not sufficient to enforce the rule priority.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 20,
-            "label": "strict_rules_priority",
-            "ok": true,
-            "rationale": "Strengthen both prompts with stricter constraints. ContextAnalyst now explicitly forbids markdown elements and limits content to essential findings only. ProblemSolver restructures rules with explicit priority ordering (RULE 1 highest), puts format constraint at the very beginning, and explicitly in",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the context in 2-3 plain text sentences. \"\n    \"CRITICAL: NO mark"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou",
-                "replace": "PROBLEM_SOLVER = (\n    \"OUTPUT FORMAT (STRICT): You must output EXACTLY ONE LINE. No explanations. N"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_strict_rules_priority.json"
+            "after_score": 0.0,
+            "accepted": false,
+            "error": "attempted relative import with no known parent package"
           },
           {
             "action": "eval_candidate",
-            "step": 21,
-            "label": "strict_rules_priority",
-            "mode": "full",
-            "rationale": "Strengthen both prompts with stricter constraints. ContextAnalyst now explicitly forbids markdown elements and limits content to essential findings only. ProblemSolver restructures rules with explicit priority ordering (RULE 1 highest), puts format constraint at the very beginning, and explicitly instructs to ignore limitations that cause incorrect 'maybe' outputs.",
+            "step": 8,
+            "label": "cand_improve_extraction",
+            "mode": "batch",
+            "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "evaluate.py",
+                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+              }
+            ],
+            "before_score": 40.0,
+            "after_score": 60.0,
+            "accepted": true,
+            "error": null
+          },
+          {
+            "action": "eval_candidate",
+            "step": 8,
+            "label": "cand_improve_format_prompt",
+            "mode": "batch",
+            "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
             "ops": [
               {
                 "op": "update",
                 "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the context in 2-3 plain text sentences. \"\n    \"CRITICAL: NO mark"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou",
-                "replace": "PROBLEM_SOLVER = (\n    \"OUTPUT FORMAT (STRICT): You must output EXACTLY ONE LINE. No explanations. N"
+                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+                "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
               }
             ],
-            "before_score": 90.0,
-            "after_score": 100.0,
+            "before_score": 40.0,
+            "after_score": 70.0,
             "accepted": true,
-            "details_count": 10,
             "error": null
           },
           {
             "action": "accept_candidate",
-            "label": "strict_rules_priority",
-            "step": 21,
-            "rationale": "Strengthen both prompts with stricter constraints. ContextAnalyst now explicitly forbids markdown elements and limits content to essential findings only. ProblemSolver restructures rules with explicit priority ordering (RULE 1 highest), puts format constraint at the very beginning, and explicitly instructs to ignore limitations that cause incorrect 'maybe' outputs.",
+            "label": "cand_improve_extraction",
+            "step": 8,
+            "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "evaluate.py",
+                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+              }
+            ],
+            "score": 60.0
+          },
+          {
+            "action": "accept_candidate",
+            "label": "cand_improve_format_prompt",
+            "step": 8,
+            "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
             "ops": [
               {
                 "op": "update",
                 "file_path": "prompts.py",
-                "search": "CONTEXT_ANALYST = (\n    \"Summarize the key information from the given context to answer the question",
-                "replace": "CONTEXT_ANALYST = (\n    \"Summarize the context in 2-3 plain text sentences. \"\n    \"CRITICAL: NO mark"
-              },
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"You are a medical research analyst. Based on the provided summary, \"\n    \"ou",
-                "replace": "PROBLEM_SOLVER = (\n    \"OUTPUT FORMAT (STRICT): You must output EXACTLY ONE LINE. No explanations. N"
+                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+                "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
               }
             ],
-            "score": 100.0
+            "score": 70.0
           },
           {
-            "action": "observe",
-            "step": 22,
-            "episode_id": "ep_8",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 23,
-            "patterns": [
-              {
-                "pattern": "Verbose output despite 'output ONLY' instruction",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains contradictory instructions: it frames the task as 'Based on the provided summary' (inviting reasoning/explanation) but also states 'output ONLY' the answer. The model prioritizes the contextual framing over the constraint, generating a full solution section before the final answer.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver generates verbose markdown analysis instead of single-line answer",
-                "root_cause": "The PROBLEM_SOLVER prompt template contains strong instructions ('output ONLY', 'exactly ONE LINE') but lacks enforcement mechanisms. The model ignores these constraints and produces lengthy markdown-formatted analysis with headers, bullet points, and structured reasoning before the final answer.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite 'possible' causality ratings that should map to YES per explicit prompt rules",
-                "root_cause": "The ProblemSolver prompt contains the rule \"'Possible'/'probable' causality means YES (not maybe)\" but the model fails to apply it because (1) the rule is buried in verbose text after narrative setup, (2) the ContextAnalyst summary contains hedging language ('may indeed be', 'potential association') that overwhelms the quantitative signal, and (3) the prompt lacks strong enforcement mechanisms to override the model's default uncertainty calibration when seeing hedging language.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite >50% evidence due to conflicting prompt instructions",
-                "root_cause": "The PROBLEM_SOLVER prompt in prompts.py contains three conflicting instructions: (1) 'output ONLY' the answer, yet the model generates lengthy analysis; (2) the CRITICAL instruction only specifies 'Answer: yes' format, omitting 'no' and 'maybe', causing confusion; (3) the >50% rule is stated but not emphasized enough to override hedging language in the summary like 'moderate efficacy'. The model sees 65% satisfaction but focuses on the 35% dissatisfaction and 'variable outcomes' language from ContextAnalyst, leading to incorrect 'maybe' classification.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite explicit prompt rule that 'Possible'/'probable' causality means YES",
-                "root_cause": "The PROBLEM_SOLVER prompt contains conflicting signals. While it explicitly states \"'Possible'/'probable' causality means YES (not maybe)\", the model ignores this rule when the summary contains limiting factors (small sample size, pre-existing conditions). The prompt's structure allows the model to override the explicit causality rule by focusing on uncertainty language in the summary.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "observe",
-            "step": 24,
-            "episode_id": "ep_9",
-            "n_trajectories": 10,
-            "mean_f1": 70.0
-          },
-          {
-            "action": "analyze",
-            "step": 25,
-            "patterns": [
-              {
-                "pattern": "ContextAnalyst generates markdown despite explicit prohibition in prompt",
-                "root_cause": "The CONTEXT_ANALYST prompt explicitly forbids markdown headers (##), bullet points (-), bold (**), and numbered lists with 'CRITICAL:' warning, yet the model outputs all of these formatting elements. The instruction is not strong enough to override the model's default formatting behavior.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs verbose explanations despite strict formatting rules requiring single-line answer",
-                "root_cause": "The PROBLEM_SOLVER prompt explicitly requires 'EXACTLY ONE LINE' with 'No explanations' and 'No markdown', but the model generates multi-line verbose reasoning with markdown headers (##) and numbered lists before the final answer. The instruction 'OUTPUT FORMAT (STRICT)' and the rule-based classification instructions are not sufficient to constrain the model to minimal output.",
-                "affected_file": "",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores RULE 1 priority when 'possible' causality is present",
-                "root_cause": "The PROBLEM_SOLVER prompt contains conflicting instructions. RULE 1 states HIGHEST PRIORITY for 'possible'/'probable'/'definite' causality → 'yes', but the model is distracted by subsequent reasoning about limitations, sample sizes, and evidence quality. The prompt structure allows the LLM to override the strict priority rule with its own assessment of 'potential association' vs 'definitive causation', causing it to output 'maybe' despite 87.5% 'possible' causality clearly triggering RULE 1.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver ignores RULE 2 (>50% positive → yes) and outputs 'maybe' despite clear majority satisfaction",
-                "root_cause": "The ProblemSolver prompt contains explicit classification rules with priority ordering, but the model fails to follow them. Instead, it performs its own nuanced analysis, concluding 'maybe' when evidence shows >50% satisfaction (65%). The prompt's strict formatting requirements ('EXACTLY ONE LINE', 'No explanations') are also ignored, with the model outputting multi-line markdown analysis.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              },
-              {
-                "pattern": "ProblemSolver outputs 'maybe' despite summary containing 'possible causality' which should trigger RULE 1 for 'yes'",
-                "root_cause": "The ProblemSolver prompt structure allows the LLM to perform extensive reasoning before applying rules, causing it to override RULE 1 (HIGHEST PRIORITY) with its own judgment that 'possible' causality is insufficient for a definitive 'yes' answer. The model incorrectly interprets 'possible' as weaker evidence than required, despite the rule explicitly stating ANY mention of 'possible'/'probable'/'definite' should result in 'yes'.",
-                "affected_file": "prompts.py",
-                "severity": "high"
-              }
-            ]
-          },
-          {
-            "action": "checkpoint_candidate",
-            "step": 25,
-            "label": "strict_system_prompt",
+            "action": "merge_candidates",
+            "step": 8,
+            "label": "cand_merged_v2",
+            "source_labels": [
+              "cand_improve_extraction",
+              "cand_improve_format_prompt"
+            ],
             "ok": true,
-            "rationale": "Change system prompt to explicitly forbid explanations and markdown. This sets the global behavior expectation before any task-specific instructions.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "SYSTEM_PROMPT = \"You are a scientist.\"",
-                "replace": "SYSTEM_PROMPT = \"You are a concise assistant. Output ONLY the requested answer. Never explain, never"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_strict_system_prompt.json"
+            "conflicts": []
           },
           {
             "action": "eval_candidate",
-            "step": 26,
-            "label": "strict_system_prompt",
+            "step": 9,
+            "label": "cand_merged_v2",
             "mode": "full",
-            "rationale": "Change system prompt to explicitly forbid explanations and markdown. This sets the global behavior expectation before any task-specific instructions.",
+            "dataset_split": "train",
+            "n_samples": 10,
+            "rationale": "Merged from cand_improve_extraction, cand_improve_format_prompt: [cand_improve_extraction] Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords; [cand_improve_format_prompt] Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
             "ops": [
               {
                 "op": "update",
+                "file_path": "evaluate.py",
+                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+              },
+              {
+                "op": "update",
                 "file_path": "prompts.py",
-                "search": "SYSTEM_PROMPT = \"You are a scientist.\"",
-                "replace": "SYSTEM_PROMPT = \"You are a concise assistant. Output ONLY the requested answer. Never explain, never"
+                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+                "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
               }
             ],
-            "before_score": 50.0,
-            "after_score": 80.0,
+            "before_score": 40.0,
+            "after_score": 60.0,
             "accepted": true,
             "details_count": 10,
-            "error": null
+            "error": null,
+            "detail_file": ".noa_meta/eval_cand_merged_v2.json"
           },
           {
-            "action": "checkpoint_candidate",
-            "step": 26,
-            "label": "few_shot_examples",
-            "ok": true,
-            "rationale": "Replace verbose rules with few-shot examples showing correct answer patterns. The model learns better from examples than from complex rule descriptions.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"OUTPUT FORMAT (STRICT): You must output EXACTLY ONE LINE. No explanations. N",
-                "replace": "PROBLEM_SOLVER = (\n    \"Examples:\\n\"\n    \"Summary: Study found 65% satisfaction rate.\\n\"\n    \"Answer"
-              }
-            ],
-            "detail_file": ".noa_meta/checkpoint_few_shot_examples.json"
-          },
-          {
-            "action": "eval_candidate",
-            "step": 27,
-            "label": "few_shot_examples",
-            "mode": "full",
-            "rationale": "Replace verbose rules with few-shot examples showing correct answer patterns. The model learns better from examples than from complex rule descriptions.",
-            "ops": [
-              {
-                "op": "update",
-                "file_path": "prompts.py",
-                "search": "PROBLEM_SOLVER = (\n    \"OUTPUT FORMAT (STRICT): You must output EXACTLY ONE LINE. No explanations. N",
-                "replace": "PROBLEM_SOLVER = (\n    \"Examples:\\n\"\n    \"Summary: Study found 65% satisfaction rate.\\n\"\n    \"Answer"
-              }
-            ],
-            "before_score": 50.0,
-            "after_score": 80.0,
-            "accepted": true,
-            "details_count": 10,
-            "error": null
-          },
-          {
-            "action": "final_eval_skipped",
-            "step": 28,
+            "action": "test_eval_candidate",
+            "step": 9,
             "trigger": "pre_spawn",
-            "reason": "no_top_candidates",
-            "baseline_score": 78.0
+            "label": "cand_improve_extraction",
+            "dataset_split": "test",
+            "n_samples": 200,
+            "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "evaluate.py",
+                "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+                "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+              }
+            ],
+            "train_score": 60.0,
+            "baseline_score": 36.0,
+            "test_score": 44.5,
+            "accepted": true,
+            "error": null,
+            "detail_file": ".noa_meta/test_eval_step_9_cand_improve_extraction.json"
+          },
+          {
+            "action": "test_eval_candidate",
+            "step": 9,
+            "trigger": "pre_spawn",
+            "label": "cand_improve_format_prompt",
+            "dataset_split": "test",
+            "n_samples": 200,
+            "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+            "ops": [
+              {
+                "op": "update",
+                "file_path": "prompts.py",
+                "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+                "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
+              }
+            ],
+            "train_score": 70.0,
+            "baseline_score": 36.0,
+            "test_score": 41.0,
+            "accepted": true,
+            "error": null,
+            "detail_file": ".noa_meta/test_eval_step_9_cand_improve_format_prompt.json"
+          },
+          {
+            "action": "final_eval_commit",
+            "step": 9,
+            "trigger": "pre_spawn",
+            "label": "cand_improve_extraction",
+            "test_score": 44.5,
+            "baseline_score": 48.0,
+            "detail_file": ".noa_meta/test_eval_step_9_cand_improve_extraction.json"
           },
           {
             "action": "spawn_sublayer",
-            "step": 28,
+            "step": 9,
             "child_level": 2,
-            "child_score": 78.01,
+            "child_score": 72.0,
             "child_accepted": 1,
             "noa_modified": true
           }
         ],
-        "steps": 28,
+        "steps": 9,
         "budget_usage": {
-          "steps": "28/30",
-          "llm_calls": "9/999999",
-          "evals": "9/20",
-          "spawn_calls": "1/1",
+          "steps": "9/20",
+          "llm_calls": "2/999999",
+          "evals": 9,
+          "spawn_calls": "0/1",
           "max_no_improve_steps": 8,
           "no_improve_count": 0,
           "target_delta": Infinity
         },
-        "spawn_restart": true,
-        "final_eval": null,
+        "spawn_restart": false,
+        "final_eval": {
+          "label": "cand_improve_extraction",
+          "test_score": 44.5
+        },
         "top_candidates": [
           {
-            "label": "strict_system_prompt",
-            "train_score": 80.0
+            "label": "cand_improve_format_prompt",
+            "train_score": 70.0
           },
           {
-            "label": "few_shot_examples",
-            "train_score": 80.0
+            "label": "cand_improve_extraction",
+            "train_score": 60.0
+          },
+          {
+            "label": "cand_merged_v2",
+            "train_score": 60.0
           }
         ]
       }
     }
   ],
   "total_rounds": 1,
-  "run_dir": "/Users/erv1n/NestedAgent/.noa_runs/20260312_234801",
+  "run_dir": "/Users/erv1n/NestedAgent/.noa_runs/20260314_120027",
   "snapshots": [
     "after_round_0",
     "init"

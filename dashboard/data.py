@@ -340,6 +340,231 @@ def load_detail_payload(path: Path | None) -> dict[str, Any] | list[Any] | None:
         return None
 
 
+def _normalize_eval_split(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized in {"val", "validation", "valid"}:
+        return "validation"
+    if normalized in {"test", "human_generated_eval"}:
+        return "test"
+    if normalized == "train":
+        return "train"
+    return normalized
+
+
+def _infer_split_from_sample_id(sample_id: Any) -> str | None:
+    if not isinstance(sample_id, str):
+        return None
+    normalized = sample_id.lower()
+    if "_train_" in normalized or normalized.startswith("train_"):
+        return "train"
+    if (
+        "_val_" in normalized
+        or "_valid_" in normalized
+        or normalized.startswith("val_")
+    ):
+        return "validation"
+    if "_test_" in normalized or normalized.startswith("test_"):
+        return "test"
+    return None
+
+
+def _infer_eval_split(event: dict[str, Any]) -> str:
+    explicit = _normalize_eval_split(event.get("dataset_split") or event.get("split"))
+    if explicit:
+        return explicit
+    event_name = str(event.get("event") or "")
+    if event_name == "validation_eval":
+        return "validation"
+    if event_name in {
+        "test_eval_candidate",
+        "final_eval_commit",
+        "final_eval_no_commit",
+    }:
+        return "test"
+    if event_name in {"eval_candidate", "eval"}:
+        return "train"
+    return "unknown"
+
+
+def _first_number(*values: Any) -> float | None:
+    for value in values:
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def _trim_text(value: Any, limit: int = 240) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _resolve_eval_detail_file(
+    run_dir: Path, current_run: dict[str, Any], event: dict[str, Any]
+) -> Path | None:
+    detail_file = event.get("detail_file")
+    if isinstance(detail_file, str) and detail_file:
+        return resolve_detail_file(run_dir, current_run, detail_file)
+
+    if event.get("event") == "eval_candidate":
+        label = event.get("label") or event.get("candidate_label")
+        if isinstance(label, str) and label:
+            source_dir = current_run.get("source_dir")
+            if isinstance(source_dir, str) and source_dir:
+                candidate = Path(source_dir) / ".noa_meta" / f"eval_{label}.json"
+                if candidate.exists():
+                    return candidate
+    return None
+
+
+def _build_eval_detail_rows(
+    payload: dict[str, Any] | list[Any] | None,
+    *,
+    default_split: str,
+) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        details = payload.get("details", [])
+    elif isinstance(payload, list):
+        details = payload
+    else:
+        details = []
+
+    rows: list[dict[str, Any]] = []
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        sample_id = str(item.get("id") or item.get("index") or "")
+        split = (
+            _normalize_eval_split(item.get("split"))
+            or _infer_split_from_sample_id(sample_id)
+            or default_split
+        )
+        score = _first_number(
+            item.get("accuracy"),
+            item.get("f1"),
+            item.get("raw_score"),
+            item.get("score"),
+        )
+        rows.append(
+            {
+                "split": split,
+                "sample_id": sample_id or "-",
+                "question": str(item.get("question") or item.get("prompt") or ""),
+                "ground_truth": item.get("ground_truth", item.get("answer")),
+                "prediction": str(item.get("prediction") or item.get("output") or ""),
+                "prediction_preview": _trim_text(
+                    item.get("prediction") or item.get("output") or "", limit=280
+                ),
+                "extracted": item.get("extracted"),
+                "score": round(score, 3) if score is not None else None,
+                "accepted": item.get("accepted"),
+                "steps": item.get("steps"),
+            }
+        )
+    return rows
+
+
+def _summarize_eval_details(detail_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[float]] = {}
+    for row in detail_rows:
+        split = str(row.get("split") or "unknown")
+        score = row.get("score")
+        grouped.setdefault(split, [])
+        if isinstance(score, (int, float)):
+            grouped[split].append(float(score))
+
+    summary: list[dict[str, Any]] = []
+    for split, scores in grouped.items():
+        avg_score = round(sum(scores) / len(scores), 3) if scores else None
+        summary.append(
+            {
+                "split": split,
+                "samples": sum(1 for row in detail_rows if row.get("split") == split),
+                "avg_score": avg_score,
+            }
+        )
+    summary.sort(key=lambda item: item["split"])
+    return summary
+
+
+def build_evaluation_rows(
+    events: list[dict[str, Any]],
+    run_dir: Path,
+    current_run: dict[str, Any],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        event_name = str(event.get("event") or "")
+        if event_name not in {
+            "baseline_eval",
+            "eval_candidate",
+            "validation_eval",
+            "test_eval_candidate",
+            "final_eval_commit",
+        }:
+            continue
+
+        label = event.get("label") or event.get("candidate_label")
+        if not isinstance(label, str) or not label:
+            continue
+
+        split = _infer_eval_split(event)
+        detail_path = _resolve_eval_detail_file(run_dir, current_run, event)
+        detail_payload = load_detail_payload(detail_path)
+        detail_rows = _build_eval_detail_rows(detail_payload, default_split=split)
+        detail_summary = _summarize_eval_details(detail_rows)
+        score = _first_number(
+            event.get("after_score"),
+            event.get("val_score"),
+            event.get("test_score"),
+            event.get("score"),
+        )
+        baseline_score = _first_number(
+            event.get("before_score"),
+            event.get("baseline_score"),
+        )
+        n_samples = event.get("n_samples")
+        if not isinstance(n_samples, int):
+            n_samples = len(detail_rows) or event.get("details_count")
+
+        rows.append(
+            {
+                "ts": event.get("ts"),
+                "event": event_name,
+                "split": split,
+                "label": label,
+                "score": round(score, 2) if score is not None else None,
+                "baseline_score": round(baseline_score, 2)
+                if baseline_score is not None
+                else None,
+                "delta": round(score - baseline_score, 2)
+                if score is not None and baseline_score is not None
+                else None,
+                "accepted": event.get("accepted"),
+                "error": event.get("error"),
+                "rationale": str(event.get("rationale") or ""),
+                "ops": event.get("ops", []),
+                "n_samples": n_samples,
+                "detail_file": event.get("detail_file"),
+                "detail_path": detail_path,
+                "detail_rows": detail_rows,
+                "detail_summary": detail_summary,
+                "train_score": _first_number(event.get("train_score")),
+                "detail_count": len(detail_rows),
+            }
+        )
+
+    rows.sort(key=lambda item: item.get("ts", ""), reverse=True)
+    return rows
+
+
 def build_candidate_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_label: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -483,6 +708,7 @@ def build_run_snapshot(
         "events": events,
         "timeline": timeline_rows(events),
         "candidate_rows": build_candidate_rows(events),
+        "evaluation_rows": build_evaluation_rows(events, run_dir, current_run),
         "llm_entries": llm_entries,
         "llm_summary": llm_summary,
         "configured_provider": configured_provider,

@@ -137,7 +137,7 @@ def main():
         eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=eval_max_workers),
         test_eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=eval_max_workers),
         score_fn=exact_match,
-        l1_max_steps=opt.get("max_steps", 30),
+        l1_max_steps=opt.get("max_steps", 20),
         l1_n_samples=opt.get("n_samples", 30),
         l1_model=model,
         l1_max_llm_calls=opt.get("max_llm_calls", 999999),

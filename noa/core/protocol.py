@@ -200,8 +200,8 @@ class LayerContext:
             f"- If you see component names like 'QuestionRewriter', 'Retriever' etc. in trajectory data, "
             f"those are the TARGET SYSTEM's components that the lower-layer was trying to optimize. "
             f"Do NOT try to modify those files — they are outside your scope.\n"
-            f"- Focus on: analyzer prompts, optimizer prompts, evaluation logic, guardrails, "
-            f"observation strategies, and other optimizer framework code."
+            f"- You can modify ANY code in `{writable_name}/` — agent logic, candidate selection, "
+            f"evaluation orchestration, prompts, config, utilities."
         )
 
         if self.parent_summary:
@@ -269,9 +269,92 @@ class LayerContext:
                         f"  [Step {step}] REJECT: {h.get('label', '?')} "
                         f"reason={h.get('reason', '')[:150]}"
                     )
+                elif action == "validation_eval":
+                    val_status = "COMMITTED" if h.get("accepted") else "REJECTED"
+                    parts.append(
+                        f"  [Step {step}] VAL_EVAL: {h.get('label', '?')} [{val_status}] "
+                        f"val_score={h.get('val_score', 0):.2f} "
+                        f"(baseline={h.get('baseline_score', 0):.2f}, train={h.get('train_score', 0):.2f})"
+                    )
+                elif action in ("final_eval_commit", "final_eval_no_commit"):
+                    parts.append(
+                        f"  [Step {step}] FINAL_EVAL: {h.get('label', 'none')} "
+                        f"test_score={h.get('test_score', 0):.2f} "
+                        f"baseline={h.get('baseline_score', 0):.2f}"
+                    )
+                elif action == "test_eval_candidate":
+                    parts.append(
+                        f"  [Step {step}] TEST_EVAL: {h.get('label', '?')} "
+                        f"test_score={h.get('test_score', 0):.2f} "
+                        f"train_score={h.get('train_score', 0):.2f}"
+                    )
                 else:
                     # fallback: 旧格式或其他 action
                     parts.append(f"  [{action}] {json.dumps(h, default=str)[:200]}")
+
+            # --- Decision quality summary ---
+            all_evals = [
+                h for h in self.parent_history if h.get("action") == "eval_candidate"
+            ]
+            val_evals = [
+                h for h in self.parent_history if h.get("action") == "validation_eval"
+            ]
+            final_evals = [
+                h
+                for h in self.parent_history
+                if h.get("action") in ("final_eval_commit", "test_eval_candidate")
+            ]
+            if all_evals:
+                n_zero = sum(1 for e in all_evals if e.get("after_score", 0) == 0)
+                best_train = max(
+                    (e.get("after_score", 0) for e in all_evals), default=0
+                )
+                best_val = (
+                    max((e.get("val_score", 0) for e in val_evals), default=0)
+                    if val_evals
+                    else None
+                )
+                best_test = (
+                    max((e.get("test_score", 0) for e in final_evals), default=0)
+                    if final_evals
+                    else None
+                )
+                parts.append("\n### L1 Decision Quality Summary")
+                parts.append(
+                    f"  Total evals: {len(all_evals)}, zero-score: {n_zero} ({100*n_zero//max(len(all_evals),1)}%)"
+                )
+                parts.append(f"  Best train score: {best_train:.2f}")
+                if best_val is not None:
+                    parts.append(f"  Best val score: {best_val:.2f}")
+                if best_test is not None:
+                    parts.append(f"  Best test score: {best_test:.2f}")
+                if best_val and best_test and best_val > best_test + 5:
+                    parts.append(
+                        f"  ⚠ Val→Test gap: {best_val:.2f} → {best_test:.2f} "
+                        f"(delta={best_val - best_test:+.2f}). "
+                        f"Investigate: are good candidates being lost in the selection pipeline?"
+                    )
+                if n_zero > len(all_evals) * 0.4:
+                    parts.append(
+                        f"  ⚠ High zero-score rate ({n_zero}/{len(all_evals)}). "
+                        f"Investigate: are patches frequently breaking the target system?"
+                    )
+                # Detect repeated errors
+                from collections import Counter
+
+                zero_errors = [
+                    e.get("error", "")
+                    for e in all_evals
+                    if e.get("after_score", 0) == 0 and e.get("error")
+                ]
+                if zero_errors:
+                    error_counts = Counter(zero_errors).most_common(3)
+                    repeated = [(err, cnt) for err, cnt in error_counts if cnt >= 2]
+                    if repeated:
+                        parts.append("  ⚠ Repeated errors across rounds:")
+                        for err, cnt in repeated:
+                            parts.append(f"    - {cnt}x: {err[:120]}")
+
         parts.append(
             f"Spawn budget: {self.spawn_calls_used}/{self.max_spawn_calls}, max_depth={self.max_depth}"
         )

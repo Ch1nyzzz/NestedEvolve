@@ -8,7 +8,7 @@
     "split": "train"
   },
   "optimizer": {
-    "max_steps": 30,
+    "max_steps": 20,
     "n_samples": 10,
     "provider": "together_ai",
     "model": "moonshotai/Kimi-K2.5",
@@ -16,12 +16,12 @@
   },
   "spawn": {
     "l2": {
-      "max_steps": 20,
+      "max_steps": 10,
       "n_samples": 1,
       "max_no_improve_steps": 6
     },
     "mini_l1": {
-      "max_steps": 10,
+      "max_steps": 20,
       "n_samples": 10,
       "max_no_improve_steps": 4
     }

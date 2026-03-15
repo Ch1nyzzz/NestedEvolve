@@ -1,563 +1,813 @@
 {
   "l2_result": {
-    "final_score": 76.0,
-    "baseline_score": 74.0,
-    "iterations": 5,
-    "accepted": 1,
+    "final_score": 44.5,
+    "baseline_score": 44.5,
+    "iterations": 6,
+    "accepted": 0,
     "history": [
       {
         "action": "observe",
         "step": 1,
         "episode_id": "ep_1",
-        "n_trajectories": 7,
-        "mean_f1": 60.0,
+        "n_records": 32,
+        "n_evals": 9,
+        "n_accepted": 5,
         "source": "parent_history"
       },
       {
         "action": "analyze",
         "step": 2,
-        "patterns": [
-          {
-            "pattern": "Optimizer generates patches against stale source context causing destructive re-application",
-            "root_cause": "The optimizer stage retrieves the original source code from the initiator's SystemDescription rather than the current workspace state when generating SEARCH/REPLACE blocks. When the L1 optimizer attempts similar fixes after previous patches were applied (e.g., 'final_combined_fix' after 'combined_fixes'), the SEARCH blocks match against outdated content or partially match current content, resulting in malformed files and severe performance regression (80.0 → 50.0).",
-            "affected_file": "stages/optimizer.py",
-            "severity": "high"
-          },
-          {
-            "pattern": "L1 Analyzer produces malformed/truncated diagnosis output with concatenated JSON fragments",
-            "root_cause": "The Analyzer stage extracts pattern objects from LLM responses using brittle regex or string splitting that fails to properly match nested braces or handle multi-pattern outputs. The extraction cuts off mid-object (e.g., 'root_ca; {'pattern': ...) and concatenates multiple partial matches into invalid JSON, preventing downstream components from parsing the diagnosis correctly.",
-            "affected_file": "stages/analyzer.py",
-            "severity": "high"
-          }
-        ]
+        "patterns": []
       },
       {
         "action": "checkpoint_candidate",
         "step": 2,
-        "label": "fix_optimizer_stale_source",
+        "label": "cand_fix_relative_import",
         "ok": true,
-        "rationale": "Fix critical bug where optimizer generates patches against stale source context from SystemDescription. The optimizer was using sys_desc.get_source_context() which returns the original snapshot from when the system was first analyzed. When patches are applied incrementally, subsequent patches fail b",
+        "rationale": "Fix the 'attempted relative import with no known parent package' error by adding target_source_dir and its parent to sys.path before importing modules. This ensures relative imports in the target system can resolve properly when running in subprocess.",
         "ops": [
           {
             "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp",
-            "replace": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin",
-            "replace": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO",
-            "replace": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO"
-          }
-        ]
-      },
-      {
-        "action": "eval_candidate",
-        "step": 3,
-        "label": "fix_optimizer_stale_source",
-        "mode": "full",
-        "rationale": "Fix critical bug where optimizer generates patches against stale source context from SystemDescription. The optimizer was using sys_desc.get_source_context() which returns the original snapshot from when the system was first analyzed. When patches are applied incrementally, subsequent patches fail because SEARCH blocks don't match the current file content. This fix adds _read_current_workspace_files() to read the actual current state from disk before generating patches, ensuring SEARCH/REPLACE b",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp",
-            "replace": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin",
-            "replace": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO",
-            "replace": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO"
+            "file_path": "subprocess_runner.py",
+            "search": "    runner_code = textwrap.dedent(\n        f\"\"\"\\\n        import sys, os, json, pickle\n\n        noa_p",
+            "replace": "    runner_code = textwrap.dedent(\n        f\"\"\"\\\n        import sys, os, json, pickle\n\n        noa_p"
           }
         ],
-        "before_score": 74.0,
-        "after_score": 78.0,
-        "accepted": true,
-        "details_count": 1,
-        "error": null
-      },
-      {
-        "action": "accept_candidate",
-        "label": "fix_optimizer_stale_source",
-        "step": 3,
-        "rationale": "Fix critical bug where optimizer generates patches against stale source context from SystemDescription. The optimizer was using sys_desc.get_source_context() which returns the original snapshot from when the system was first analyzed. When patches are applied incrementally, subsequent patches fail because SEARCH blocks don't match the current file content. This fix adds _read_current_workspace_files() to read the actual current state from disk before generating patches, ensuring SEARCH/REPLACE b",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp",
-            "replace": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin",
-            "replace": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO",
-            "replace": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO"
-          }
-        ],
-        "score": 78.0
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_fix_relative_import.json"
       },
       {
         "action": "checkpoint_candidate",
-        "step": 3,
-        "label": "fix_analyzer_json_parsing",
+        "step": 2,
+        "label": "cand_fix_merge_base",
         "ok": true,
-        "rationale": "Fix brittle JSON parsing in analyzer that causes malformed/truncated diagnosis output. The original code uses simple string.find() for brackets which fails with nested braces or concatenated JSON fragments. This fix implements proper brace counting with string escaping awareness to correctly extract",
+        "rationale": "Fix merge candidates producing 0 scores by ensuring checkpoint always uses the original source_dir as base. The _accepted_snapshot may have accumulated changes that cause patches to fail when merged, leading to broken candidates.",
         "ops": [
           {
             "op": "update",
-            "file_path": "stages/analyzer.py",
-            "search": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\"\"\"\n    tr",
-            "replace": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\n    \n    "
+            "file_path": "sandbox_manager.py",
+            "search": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        if self._a",
+            "replace": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        # Always u"
           }
-        ]
+        ],
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_fix_merge_base.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 2,
+        "label": "cand_improve_val_selection",
+        "ok": true,
+        "rationale": "First step toward fixing train/test gap: extend top_candidates to track validation scores. This prepares for using validation scores in final candidate selection to reduce overfitting to training data.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "unified_agent.py",
+            "search": "        # Top-K 候选池\n        self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}",
+            "replace": "        # Top-K 候选池 - now tracks both train and val scores for better selection\n        self._top_ca"
+          }
+        ],
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_val_selection.json"
       },
       {
         "action": "eval_candidate",
-        "step": 4,
-        "label": "fix_analyzer_json_parsing",
-        "mode": "full",
-        "rationale": "Fix brittle JSON parsing in analyzer that causes malformed/truncated diagnosis output. The original code uses simple string.find() for brackets which fails with nested braces or concatenated JSON fragments. This fix implements proper brace counting with string escaping awareness to correctly extract complete JSON objects/arrays from LLM responses.",
+        "step": 3,
+        "label": "cand_fix_relative_import",
+        "mode": "batch",
+        "rationale": "Fix the 'attempted relative import with no known parent package' error by adding target_source_dir and its parent to sys.path before importing modules. This ensures relative imports in the target system can resolve properly when running in subprocess.",
         "ops": [
           {
             "op": "update",
-            "file_path": "stages/analyzer.py",
-            "search": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\"\"\"\n    tr",
-            "replace": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\n    \n    "
+            "file_path": "subprocess_runner.py",
+            "search": "    runner_code = textwrap.dedent(\n        f\"\"\"\\\n        import sys, os, json, pickle\n\n        noa_p",
+            "replace": "    runner_code = textwrap.dedent(\n        f\"\"\"\\\n        import sys, os, json, pickle\n\n        noa_p"
           }
         ],
-        "before_score": 78.0,
-        "after_score": 76.0,
+        "before_score": 44.5,
+        "after_score": 0.0,
         "accepted": false,
-        "details_count": 1,
         "error": null
-      },
-      {
-        "action": "checkpoint_candidate",
-        "step": 4,
-        "label": "combined_framework_fixes",
-        "ok": true,
-        "rationale": "Combined fix: 1) Fix optimizer stale source context issue by reading current workspace files before generating patches, ensuring SEARCH/REPLACE blocks match actual file content. 2) Fix analyzer JSON parsing with proper brace counting to handle nested structures and concatenated fragments. Both fixes",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp",
-            "replace": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin",
-            "replace": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO",
-            "replace": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/analyzer.py",
-            "search": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\"\"\"\n    tr",
-            "replace": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\n    \n    "
-          }
-        ]
       },
       {
         "action": "eval_candidate",
-        "step": 5,
-        "label": "combined_framework_fixes",
-        "mode": "full",
-        "rationale": "Combined fix: 1) Fix optimizer stale source context issue by reading current workspace files before generating patches, ensuring SEARCH/REPLACE blocks match actual file content. 2) Fix analyzer JSON parsing with proper brace counting to handle nested structures and concatenated fragments. Both fixes address critical framework bugs identified in L1 parent history.",
+        "step": 3,
+        "label": "cand_fix_merge_base",
+        "mode": "batch",
+        "rationale": "Fix merge candidates producing 0 scores by ensuring checkpoint always uses the original source_dir as base. The _accepted_snapshot may have accumulated changes that cause patches to fail when merged, leading to broken candidates.",
         "ops": [
           {
             "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp",
-            "replace": "from noa.core.protocol import SystemDescription, Diagnosis, DeltaPatch, PatchOp, SourceFile"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin",
-            "replace": "def _safe_int(val, default: int) -> int:\n    \"\"\"容错解析整数，处理 LLM 返回 '[130, 160]' 等非标准格式。\"\"\"\n    if isin"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/optimizer.py",
-            "search": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO",
-            "replace": "def optimize(\n    sys_desc: SystemDescription,\n    diagnosis: Diagnosis,\n    model: str = DEFAULT_MO"
-          },
-          {
-            "op": "update",
-            "file_path": "stages/analyzer.py",
-            "search": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\"\"\"\n    tr",
-            "replace": "def _parse_patterns(text: str) -> list[dict]:\n    \"\"\"从 LLM 输出中提取 failure patterns JSON 列表。\n    \n    "
+            "file_path": "sandbox_manager.py",
+            "search": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        if self._a",
+            "replace": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        # Always u"
           }
         ],
-        "before_score": 78.0,
-        "after_score": 80.0,
-        "accepted": true,
-        "details_count": 1,
+        "before_score": 44.5,
+        "after_score": 0.0,
+        "accepted": false,
         "error": null
       },
       {
-        "action": "final_eval_commit",
+        "action": "eval_candidate",
+        "step": 3,
+        "label": "cand_improve_val_selection",
+        "mode": "batch",
+        "rationale": "First step toward fixing train/test gap: extend top_candidates to track validation scores. This prepares for using validation scores in final candidate selection to reduce overfitting to training data.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "unified_agent.py",
+            "search": "        # Top-K 候选池\n        self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}",
+            "replace": "        # Top-K 候选池 - now tracks both train and val scores for better selection\n        self._top_ca"
+          }
+        ],
+        "before_score": 44.5,
+        "after_score": 38.5,
+        "accepted": false,
+        "error": null
+      },
+      {
+        "action": "observe",
+        "step": 4,
+        "episode_id": "ep_2",
+        "source": "own_eval_history",
+        "n_eval_records": 3
+      },
+      {
+        "action": "analyze",
         "step": 5,
+        "patterns": []
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 5,
+        "label": "cand_fix_relative_import_v2",
+        "ok": true,
+        "rationale": "Fix the 'attempted relative import with no known parent package' error by adding target_source_dir and its parent to sys.path before importing modules. This ensures relative imports in the target system can resolve properly when running in subprocess.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "subprocess_runner.py",
+            "search": "        for p in [noa_parent, project_root]:\n            if p not in sys.path:\n                sys.p",
+            "replace": "        for p in [noa_parent, project_root]:\n            if p not in sys.path:\n                sys.p"
+          }
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_fix_relative_import_v2.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 5,
+        "label": "cand_fix_merge_base_v2",
+        "ok": true,
+        "rationale": "Fix merge candidates producing 0 scores by ensuring checkpoint always uses the original source_dir as base. The _accepted_snapshot may have accumulated changes that cause patches to fail when merged, leading to broken candidates.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "sandbox_manager.py",
+            "search": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        if self._a",
+            "replace": "    def _get_checkpoint_base(self) -> str:\n        \"\"\"返回 checkpoint 应该复制的基础目录。\"\"\"\n        # Always u"
+          }
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_fix_merge_base_v2.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 5,
+        "label": "cand_improve_val_tracking",
+        "ok": true,
+        "rationale": "First step toward fixing train/test gap: extend top_candidates to track validation scores. This prepares for using validation scores in final candidate selection to reduce overfitting to training data.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "unified_agent.py",
+            "search": "        # Top-K 候选池\n        self._top_candidates: list[dict] = []  # [{label, score, ops, rationale}",
+            "replace": "        # Top-K 候选池 - now tracks both train and val scores for better selection\n        self._top_ca"
+          }
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_val_tracking.json"
+      },
+      {
+        "action": "eval_candidate",
+        "step": 6,
+        "label": "cand_fix_relative_import_v2",
+        "mode": "batch",
+        "rationale": "Fix the 'attempted relative import with no known parent package' error by adding target_source_dir and its parent to sys.path before importing modules. This ensures relative imports in the target system can resolve properly when running in subprocess.",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "subprocess_runner.py",
+            "search": "        for p in [noa_parent, project_root]:\n            if p not in sys.path:\n                sys.p",
+            "replace": "        for p in [noa_parent, project_root]:\n            if p not in sys.path:\n                sys.p"
+          }
+        ],
+        "before_score": 44.5,
+        "after_score": 41.0,
+        "accepted": false,
+        "error": null
+      },
+      {
+        "action": "final_eval_skipped",
+        "step": 6,
         "trigger": "finish",
-        "label": "fix_optimizer_stale_source",
-        "test_score": 76.0,
-        "baseline_score": 74.0
+        "reason": "no_top_candidates",
+        "baseline_score": 44.5
       }
     ],
-    "steps": 5,
+    "steps": 6,
     "budget_usage": {
-      "steps": "5/5",
-      "llm_calls": "1/60",
-      "evals": "3/5",
+      "steps": "6/10",
+      "llm_calls": "2/999999",
+      "evals": 4,
       "spawn_calls": "0/0",
-      "max_no_improve_steps": 3,
+      "max_no_improve_steps": 6,
       "no_improve_count": 0,
       "target_delta": Infinity
     },
     "spawn_restart": false,
-    "final_eval": {
-      "label": "fix_optimizer_stale_source",
-      "test_score": 76.0
-    },
-    "top_candidates": [
-      {
-        "label": "fix_optimizer_stale_source",
-        "train_score": 78.0
-      }
-    ]
+    "final_eval": null,
+    "top_candidates": []
   },
   "l1_context": {
-    "baseline_score": 72.0,
-    "final_score": 74.0,
+    "baseline_score": 36.0,
+    "final_score": 44.5,
     "accepted_patches": [
+      {
+        "action": "baseline_eval",
+        "step": 0,
+        "label": "baseline",
+        "dataset_split": "test",
+        "score": 36.0,
+        "n_samples": 200
+      },
+      {
+        "action": "baseline_eval",
+        "step": 0,
+        "label": "baseline",
+        "dataset_split": "validation",
+        "score": 42.0,
+        "n_samples": 50
+      },
       {
         "action": "observe",
         "step": 1,
         "episode_id": "ep_1",
         "n_trajectories": 10,
-        "mean_f1": 40.0
+        "mean_f1": 20.0
       },
       {
         "action": "analyze",
         "step": 2,
         "patterns": [
-          "{'pattern': 'Model selection output is ignored by llm_call - selector chooses one model but a different model is actually used', 'root_cause': \"The ll",
-          "{'pattern': \"ProblemSolver outputs 'maybe' for conditional effectiveness cases where evidence shows the marker/intervention works in specific subgroup",
-          "{'pattern': \"ContextAnalyst generates summary with embedded answer ('Yes/No...') that biases downstream ProblemSolver\", 'root_cause': \"The CONTEXT_ANA",
-          "{'pattern': \"The regex `(?i)\\\\b(yes|no|maybe)\\\\b` matches 'no' or 'yes' in explanatory phrases like 'yes or no' before reaching the final 'Answer: may",
-          "{'pattern': \"ContextAnalyst produces overly balanced summaries that nullify significant positive findings by giving equal weight to null results, caus",
-          "{'pattern': 'False positive failure reporting for F1=1.0 predictions', 'root_cause': \"The evaluation system incorrectly categorizes trajectories with ",
-          "{'pattern': 'False failure labeling when answer extraction succeeds', 'root_cause': \"The trajectory is marked as [FAIL] despite F1=1.00 because the ev"
+          {
+            "pattern": "Empty answer with finish_reason='length' and tokens_used=max_tokens",
+            "root_cause": "The ProblemSolver component has max_tokens=2048 which is insufficient when the ContextAnalyst produces a long summary. The model consumes tokens for the system prompt, template, question, and summary, leaving no room to generate the actual yes/no/maybe answer. The model hits the token limit and returns an empty response.",
+            "affected_file": "config.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "context_truncation_cascade_failure",
+            "root_cause": "When input context is truncated (marked as '(ABSTRACT TRUNCATED)'), the ContextAnalyst correctly identifies that the context is insufficient to answer, but this uncertainty signal is not properly propagated to or respected by the ProblemSolver, which may hallucinate an incorrect answer or produce inconsistent outputs",
+            "affected_file": "components.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "ProblemSolver hits max_tokens limit (finish_reason='length') when processing detailed summaries from ContextAnalyst",
+            "root_cause": "The ProblemSolver's prompt template ('You are supposed to provide a solution...') is too open-ended, causing the model to generate verbose explanations before the required 'Answer: yes/no/maybe' format. When ContextAnalyst produces a detailed summary (1381 tokens), the ProblemSolver attempts to elaborate extensively and exceeds the 2048 token limit before producing the final answer line.",
+            "affected_file": "prompts.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "ContextAnalyst produces empty output with finish_reason='length' when context is significantly longer than question",
+            "root_cause": "The prompt template concatenates context and question in a way that causes the model to enter a generation loop when the context is much longer than the question, consuming all available tokens without producing meaningful output",
+            "affected_file": "components.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "Empty output with finish_reason='length' despite empty intermediate input from upstream",
+            "root_cause": "ProblemSolver inherits the same insufficient max_tokens=2048 configuration. Even with empty summary input, the combined prompt (system + template + question + format instructions) consumes the full token budget.",
+            "affected_file": "config.py",
+            "severity": "high"
+          }
         ]
       },
       {
         "action": "checkpoint_candidate",
         "step": 2,
-        "label": "fix_answer_extraction",
+        "label": "cand_increase_max_tokens",
         "ok": true,
-        "rationale": "Fix critical bug in answer extraction: The original regex matches 'no' in phrases like 'yes or no' before reaching the actual 'Answer: maybe' at the end. New logic: 1) First try explicit 'Answer: X' format, 2) Fallback to last occurrence of yes/no/maybe to avoid matching inside explanatory phrases.",
+        "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
         "ops": [
           {
             "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-          }
-        ]
-      },
-      {
-        "action": "eval_candidate",
-        "step": 3,
-        "label": "fix_answer_extraction",
-        "mode": "full",
-        "rationale": "Fix critical bug in answer extraction: The original regex matches 'no' in phrases like 'yes or no' before reaching the actual 'Answer: maybe' at the end. New logic: 1) First try explicit 'Answer: X' format, 2) Fallback to last occurrence of yes/no/maybe to avoid matching inside explanatory phrases.",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
           }
         ],
-        "before_score": 72.0,
-        "after_score": 70.0,
-        "accepted": false,
-        "details_count": 10,
-        "error": null
-      },
-      {
-        "action": "reject_candidate",
-        "step": 3,
-        "label": "fix_answer_extraction",
-        "rationale": "Fix critical bug in answer extraction: The original regex matches 'no' in phrases like 'yes or no' before reaching the actual 'Answer: maybe' at the end. New logic: 1) First try explicit 'Answer: X' format, 2) Fallback to last occurrence of yes/no/maybe to avoid matching inside explanatory phrases.",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-          }
-        ],
-        "reason": "score 70.00 <= baseline 72.00"
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_increase_max_tokens.json"
       },
       {
         "action": "checkpoint_candidate",
-        "step": 3,
-        "label": "fix_context_analyst_prompt",
+        "step": 2,
+        "label": "cand_improve_solver_prompt",
         "ok": true,
-        "rationale": "Fix ContextAnalyst prompt to avoid embedding conclusions in summaries. The original prompt asks to 'summarize...to answer' which causes the model to form and embed conclusions, biasing the downstream ProblemSolver. New prompt explicitly instructs to only extract objective facts without forming concl",
+        "rationale": "Make ProblemSolver prompt more directive and concise to reduce verbosity and prevent hitting max_tokens limit",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
+            "replace": "PROBLEM_SOLVER = (\n    \"You are a medical expert. Based on the provided summary, answer the question"
+          }
+        ],
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_solver_prompt.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 2,
+        "label": "cand_improve_analyst_prompt",
+        "ok": true,
+        "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
         "ops": [
           {
             "op": "update",
             "file_path": "prompts.py",
             "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
-            "replace": "CONTEXT_ANALYST = (\n    \"You are supposed to extract and summarize relevant factual information from"
+            "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
           }
-        ]
+        ],
+        "analysis_round": 1,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_analyst_prompt.json"
       },
       {
         "action": "eval_candidate",
-        "step": 4,
-        "label": "fix_context_analyst_prompt",
-        "mode": "full",
-        "rationale": "Fix ContextAnalyst prompt to avoid embedding conclusions in summaries. The original prompt asks to 'summarize...to answer' which causes the model to form and embed conclusions, biasing the downstream ProblemSolver. New prompt explicitly instructs to only extract objective facts without forming conclusions.",
+        "step": 3,
+        "label": "cand_improve_solver_prompt",
+        "mode": "batch",
+        "rationale": "Make ProblemSolver prompt more directive and concise to reduce verbosity and prevent hitting max_tokens limit",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
+            "replace": "PROBLEM_SOLVER = (\n    \"You are a medical expert. Based on the provided summary, answer the question"
+          }
+        ],
+        "before_score": 20.0,
+        "after_score": 0.0,
+        "accepted": false,
+        "error": "attempted relative import with no known parent package"
+      },
+      {
+        "action": "eval_candidate",
+        "step": 3,
+        "label": "cand_improve_analyst_prompt",
+        "mode": "batch",
+        "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
         "ops": [
           {
             "op": "update",
             "file_path": "prompts.py",
             "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
-            "replace": "CONTEXT_ANALYST = (\n    \"You are supposed to extract and summarize relevant factual information from"
+            "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
           }
         ],
-        "before_score": 72.0,
-        "after_score": 60.0,
-        "accepted": false,
-        "details_count": 10,
-        "error": null
-      },
-      {
-        "action": "checkpoint_candidate",
-        "step": 4,
-        "label": "improve_problem_solver_prompt",
-        "ok": true,
-        "rationale": "Improve ProblemSolver prompt to provide clearer guidance on when to answer yes/no/maybe. The key issue is that the solver is too conservative, answering 'maybe' when there's partial evidence. New guidelines explicitly state to answer 'yes' if there's ANY clear evidence supporting the claim, and only",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
-          }
-        ]
-      },
-      {
-        "action": "eval_candidate",
-        "step": 5,
-        "label": "improve_problem_solver_prompt",
-        "mode": "full",
-        "rationale": "Improve ProblemSolver prompt to provide clearer guidance on when to answer yes/no/maybe. The key issue is that the solver is too conservative, answering 'maybe' when there's partial evidence. New guidelines explicitly state to answer 'yes' if there's ANY clear evidence supporting the claim, and only use 'maybe' for truly inconclusive cases.",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
-          }
-        ],
-        "before_score": 72.0,
-        "after_score": 60.0,
-        "accepted": false,
-        "details_count": 10,
-        "error": null
-      },
-      {
-        "action": "checkpoint_candidate",
-        "step": 5,
-        "label": "combined_fixes",
-        "ok": true,
-        "rationale": "Combined fix: 1) Fix answer extraction to handle 'Answer: X' format and avoid matching 'no' in phrases like 'yes or no', 2) Improve ProblemSolver prompt with clearer guidance on when to answer yes/no/maybe, especially for partial effectiveness cases.",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-          },
-          {
-            "op": "update",
-            "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
-          }
-        ]
-      },
-      {
-        "action": "eval_candidate",
-        "step": 6,
-        "label": "combined_fixes",
-        "mode": "full",
-        "rationale": "Combined fix: 1) Fix answer extraction to handle 'Answer: X' format and avoid matching 'no' in phrases like 'yes or no', 2) Improve ProblemSolver prompt with clearer guidance on when to answer yes/no/maybe, especially for partial effectiveness cases.",
-        "ops": [
-          {
-            "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-          },
-          {
-            "op": "update",
-            "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
-          }
-        ],
-        "before_score": 72.0,
-        "after_score": 80.0,
+        "before_score": 20.0,
+        "after_score": 30.0,
         "accepted": true,
-        "details_count": 10,
+        "error": null
+      },
+      {
+        "action": "eval_candidate",
+        "step": 3,
+        "label": "cand_increase_max_tokens",
+        "mode": "batch",
+        "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+          }
+        ],
+        "before_score": 20.0,
+        "after_score": 60.0,
+        "accepted": true,
         "error": null
       },
       {
         "action": "accept_candidate",
-        "label": "combined_fixes",
-        "step": 6,
-        "rationale": "Combined fix: 1) Fix answer extraction to handle 'Answer: X' format and avoid matching 'no' in phrases like 'yes or no', 2) Improve ProblemSolver prompt with clearer guidance on when to answer yes/no/maybe, especially for partial effectiveness cases.",
+        "label": "cand_increase_max_tokens",
+        "step": 3,
+        "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
         "ops": [
           {
             "op": "update",
-            "file_path": "evaluate.py",
-            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+          }
+        ],
+        "score": 60.0
+      },
+      {
+        "action": "accept_candidate",
+        "label": "cand_improve_analyst_prompt",
+        "step": 3,
+        "rationale": "Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+            "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+          }
+        ],
+        "score": 30.0
+      },
+      {
+        "action": "merge_candidates",
+        "step": 3,
+        "label": "cand_merged_v1",
+        "source_labels": [
+          "cand_increase_max_tokens",
+          "cand_improve_analyst_prompt"
+        ],
+        "ok": true,
+        "conflicts": []
+      },
+      {
+        "action": "eval_candidate",
+        "step": 4,
+        "label": "cand_merged_v1",
+        "mode": "full",
+        "dataset_split": "train",
+        "n_samples": 10,
+        "rationale": "Merged from cand_increase_max_tokens, cand_improve_analyst_prompt: [cand_increase_max_tokens] Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit; [cand_improve_analyst_prompt] Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
           },
           {
             "op": "update",
             "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
+            "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+            "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
           }
         ],
-        "score": 80.0
+        "before_score": 20.0,
+        "after_score": 0.0,
+        "accepted": false,
+        "details_count": 10,
+        "error": null,
+        "detail_file": ".noa_meta/eval_cand_merged_v1.json"
+      },
+      {
+        "action": "eval_candidate",
+        "step": 5,
+        "label": "cand_merged_v1",
+        "mode": "full",
+        "dataset_split": "train",
+        "n_samples": 10,
+        "rationale": "Merged from cand_increase_max_tokens, cand_improve_analyst_prompt: [cand_increase_max_tokens] Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit; [cand_improve_analyst_prompt] Make ContextAnalyst prompt more directive to produce shorter, more focused summaries that won't overwhelm ProblemSolver",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+          },
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "CONTEXT_ANALYST = (\n    \"You are supposed to summarize the key information from the given context \"\n",
+            "replace": "CONTEXT_ANALYST = (\n    \"You are a medical expert. Extract only the key facts from the context that "
+          }
+        ],
+        "before_score": 20.0,
+        "after_score": 20.0,
+        "accepted": false,
+        "details_count": 10,
+        "error": null,
+        "detail_file": ".noa_meta/eval_cand_merged_v1.json"
+      },
+      {
+        "action": "validation_eval",
+        "step": 6,
+        "label": "cand_increase_max_tokens",
+        "dataset_split": "validation",
+        "n_samples": 50,
+        "rationale": "Increase ProblemSolver max_tokens from 2048 to 4096 to handle long summaries from ContextAnalyst without hitting token limit",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s",
+            "replace": "    problem_solver: ComponentConfig = field(default=None)\n\n    def __post_init__(self):\n        if s"
+          }
+        ],
+        "train_score": 60.0,
+        "baseline_score": 42.0,
+        "val_score": 48.0,
+        "accepted": true,
+        "error": null,
+        "detail_file": ".noa_meta/validation_eval_step_6_cand_increase_max_tokens.json"
       },
       {
         "action": "observe",
-        "step": 7,
+        "step": 6,
         "episode_id": "ep_2",
         "n_trajectories": 10,
-        "mean_f1": 40.0
-      },
-      {
-        "action": "eval",
-        "step": 8,
-        "score": 50.0,
-        "n_samples": 10
+        "mean_f1": 50.0
       },
       {
         "action": "analyze",
-        "step": 9,
+        "step": 7,
         "patterns": [
-          "{'pattern': 'Artifacts show wrong model name despite correct model being used in LLM call', 'root_cause': 'The `_make_artifacts()` function records `c",
-          "{'pattern': \"ContextAnalyst generates summaries emphasizing limitations over affirmative findings for 'Can X play a role' questions\", 'root_cause': \"T",
-          "{'pattern': 'Regex extraction matches first occurrence of yes/no/maybe in explanatory text before final answer', 'root_cause': \"The extract_answer_yes",
-          "{'pattern': 'ContextAnalyst generates summaries that begin with yes/no/maybe conclusions, creating confirmation bias in ProblemSolver', 'root_cause': ",
-          "{'pattern': \"Model explanation contains 'yes' or 'no' before final 'Answer: maybe', causing regex to extract wrong answer\", 'root_cause': \"The extract",
-          "{'pattern': \"ProblemSolver outputs 'maybe' when summary contains clear positive evidence mixed with neutral findings\", 'root_cause': \"The ProblemSolve",
-          "{'pattern': 'Model selection output is ignored - actual LLM call uses different model than selected', 'root_cause': \"The ContextAnalyst and ProblemSol",
-          "{'pattern': 'Model selector artifacts show wrong model - records config.model instead of selected_model parameter', 'root_cause': \"The _make_artifacts",
-          "{'pattern': 'ContextAnalyst over-segmenting findings dilutes clear positive signal', 'root_cause': \"ContextAnalyst structures summary by sub-dimension"
+          {
+            "pattern": "Empty output with finish_reason='length' and tokens_used=max_tokens",
+            "root_cause": "The ContextAnalyst component has max_tokens=2048 which is insufficient for long input contexts. When the input context is very long, the model consumes all available tokens processing the input and has no remaining tokens to generate the summary output.",
+            "affected_file": "config.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "ProblemSolver outputs verbose explanatory text with embedded 'no' in multiple places before final answer, causing regex extraction ambiguity",
+            "root_cause": "The FORMAT_YESNO prompt has malformed syntax (unclosed parentheses, mixed quotes in prompts.py) and fails to enforce concise output format. The model generates lengthy analysis containing 'no' multiple times (e.g., 'no statistically significant difference', 'no evidence'), making simple regex extraction unreliable even though final answer is correct",
+            "affected_file": "prompts.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "F1=1.00 labeled as failure despite correct extraction",
+            "root_cause": "The evaluation metric shows F1=1.00 (perfect match) but sample is incorrectly labeled as [FAIL] in trajectory. The verbose output format with 'Answer: yes' at the end is correctly handled by extract_answer_yesno() regex pattern, but the trajectory labeling logic may have a bug where it misclassifies successful predictions as failures.",
+            "affected_file": "evaluate.py",
+            "severity": "high"
+          },
+          {
+            "pattern": "LLM execution components (ContextAnalyst, ProblemSolver) report finish_reason='length' with tokens_used=2048 but null/empty text outputs in trajectory",
+            "root_cause": "Prompt token consumption equals max_tokens limit leaving zero completion budget, compounded by malformed prompt template syntax (unclosed f-strings, improper escaping) causing token explosion; response parsing fails to extract text from truncated responses [NOTE: Originally referenced 'components/__init__.py' which is outside writable scope]",
+            "affected_file": "",
+            "severity": "high"
+          },
+          {
+            "pattern": "Model outputs explanatory text containing yes/no/maybe before the final answer line, causing regex extraction to potentially match wrong instance",
+            "root_cause": "The extract_answer_yesno function uses regex to find the first occurrence of yes/no/maybe in the text, but the ProblemSolver model generates detailed explanations that may contain these words before the final 'Answer: yes' line. While the current sample doesn't show this, the pattern is fragile - if the model says 'there is yes correlation' or similar, extraction would fail.",
+            "affected_file": "evaluate.py",
+            "severity": "medium"
+          }
         ]
       },
       {
         "action": "checkpoint_candidate",
-        "step": 9,
-        "label": "final_combined_fix",
+        "step": 7,
+        "label": "cand_increase_analyst_tokens",
         "ok": true,
-        "rationale": "Combined fix: 1) Fix answer extraction to handle 'Answer: X' format and avoid matching 'no' in phrases like 'yes or no', 2) Improve ProblemSolver prompt with clearer guidance on when to answer yes/no/maybe, especially for partial effectiveness cases.",
+        "rationale": "Increase ContextAnalyst max_tokens from 2048 to 4096 to handle long input contexts that were causing empty outputs due to token exhaustion",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       ",
+            "replace": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       "
+          }
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_increase_analyst_tokens.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 7,
+        "label": "cand_improve_extraction",
+        "ok": true,
+        "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
         "ops": [
           {
             "op": "update",
             "file_path": "evaluate.py",
             "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
-          },
+            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+          }
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_extraction.json"
+      },
+      {
+        "action": "checkpoint_candidate",
+        "step": 7,
+        "label": "cand_improve_format_prompt",
+        "ok": true,
+        "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+        "ops": [
           {
             "op": "update",
             "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
+            "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+            "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
           }
-        ]
+        ],
+        "analysis_round": 2,
+        "detail_file": ".noa_meta/checkpoint_cand_improve_format_prompt.json"
       },
       {
         "action": "eval_candidate",
-        "step": 10,
-        "label": "final_combined_fix",
-        "mode": "full",
-        "rationale": "Combined fix: 1) Fix answer extraction to handle 'Answer: X' format and avoid matching 'no' in phrases like 'yes or no', 2) Improve ProblemSolver prompt with clearer guidance on when to answer yes/no/maybe, especially for partial effectiveness cases.",
+        "step": 8,
+        "label": "cand_increase_analyst_tokens",
+        "mode": "batch",
+        "rationale": "Increase ContextAnalyst max_tokens from 2048 to 4096 to handle long input contexts that were causing empty outputs due to token exhaustion",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "config.py",
+            "search": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       ",
+            "replace": "        if self.context_analyst is None:\n            self.context_analyst = ComponentConfig(\n       "
+          }
+        ],
+        "before_score": 40.0,
+        "after_score": 0.0,
+        "accepted": false,
+        "error": "attempted relative import with no known parent package"
+      },
+      {
+        "action": "eval_candidate",
+        "step": 8,
+        "label": "cand_improve_extraction",
+        "mode": "batch",
+        "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
         "ops": [
           {
             "op": "update",
             "file_path": "evaluate.py",
             "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
-            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to m"
+            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+          }
+        ],
+        "before_score": 40.0,
+        "after_score": 60.0,
+        "accepted": true,
+        "error": null
+      },
+      {
+        "action": "eval_candidate",
+        "step": 8,
+        "label": "cand_improve_format_prompt",
+        "mode": "batch",
+        "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+            "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
+          }
+        ],
+        "before_score": 40.0,
+        "after_score": 70.0,
+        "accepted": true,
+        "error": null
+      },
+      {
+        "action": "accept_candidate",
+        "label": "cand_improve_extraction",
+        "step": 8,
+        "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "evaluate.py",
+            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+          }
+        ],
+        "score": 60.0
+      },
+      {
+        "action": "accept_candidate",
+        "label": "cand_improve_format_prompt",
+        "step": 8,
+        "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+            "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
+          }
+        ],
+        "score": 70.0
+      },
+      {
+        "action": "merge_candidates",
+        "step": 8,
+        "label": "cand_merged_v2",
+        "source_labels": [
+          "cand_improve_extraction",
+          "cand_improve_format_prompt"
+        ],
+        "ok": true,
+        "conflicts": []
+      },
+      {
+        "action": "eval_candidate",
+        "step": 9,
+        "label": "cand_merged_v2",
+        "mode": "full",
+        "dataset_split": "train",
+        "n_samples": 10,
+        "rationale": "Merged from cand_improve_extraction, cand_improve_format_prompt: [cand_improve_extraction] Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords; [cand_improve_format_prompt] Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "evaluate.py",
+            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
           },
           {
             "op": "update",
             "file_path": "prompts.py",
-            "search": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th",
-            "replace": "PROBLEM_SOLVER = (\n    \"You are supposed to provide a solution to a given problem \"\n    \"based on th"
+            "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+            "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
           }
         ],
-        "before_score": 80.0,
-        "after_score": 50.0,
-        "accepted": false,
+        "before_score": 40.0,
+        "after_score": 60.0,
+        "accepted": true,
         "details_count": 10,
-        "error": null
+        "error": null,
+        "detail_file": ".noa_meta/eval_cand_merged_v2.json"
+      },
+      {
+        "action": "test_eval_candidate",
+        "step": 9,
+        "trigger": "pre_spawn",
+        "label": "cand_improve_extraction",
+        "dataset_split": "test",
+        "n_samples": 200,
+        "rationale": "Improve extraction to first look for explicit 'Answer:' pattern, then use last occurrence of yes/no/maybe instead of first, to handle verbose outputs with embedded keywords",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "evaluate.py",
+            "search": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    pattern = r\"(?i)",
+            "replace": "def extract_answer_yesno(text: str) -> str:\n    \"\"\"从模型回复中提取 yes/no/maybe 答案。\"\"\"\n    # First try to f"
+          }
+        ],
+        "train_score": 60.0,
+        "baseline_score": 36.0,
+        "test_score": 44.5,
+        "accepted": true,
+        "error": null,
+        "detail_file": ".noa_meta/test_eval_step_9_cand_improve_extraction.json"
+      },
+      {
+        "action": "test_eval_candidate",
+        "step": 9,
+        "trigger": "pre_spawn",
+        "label": "cand_improve_format_prompt",
+        "dataset_split": "test",
+        "n_samples": 200,
+        "rationale": "Improve FORMAT_YESNO prompt to enforce concise output without verbose explanations that cause regex extraction ambiguity",
+        "ops": [
+          {
+            "op": "update",
+            "file_path": "prompts.py",
+            "search": "FORMAT_YESNO = (\n    \"Always conclude the last line of your response should be of the following form",
+            "replace": "FORMAT_YESNO = (\n    \"Your response must be concise. Do not include explanations or analysis. \"\n    "
+          }
+        ],
+        "train_score": 70.0,
+        "baseline_score": 36.0,
+        "test_score": 41.0,
+        "accepted": true,
+        "error": null,
+        "detail_file": ".noa_meta/test_eval_step_9_cand_improve_format_prompt.json"
       },
       {
         "action": "final_eval_commit",
-        "step": 11,
+        "step": 9,
         "trigger": "pre_spawn",
-        "label": "combined_fixes",
-        "test_score": 74.0,
-        "baseline_score": 72.0
+        "label": "cand_improve_extraction",
+        "test_score": 44.5,
+        "baseline_score": 48.0,
+        "detail_file": ".noa_meta/test_eval_step_9_cand_improve_extraction.json"
       },
       {
         "action": "spawn_sublayer",
-        "step": 11,
+        "step": 9,
         "child_level": 2,
-        "child_score": 74.0,
-        "child_accepted": 0,
-        "noa_modified": false
+        "child_score": 72.0,
+        "child_accepted": 1,
+        "noa_modified": true
       }
     ],
-    "parent_summary": "Initial: 72.00, Current: 74.00, Delta: +2.00, Accepted: 19"
+    "parent_summary": "Initial: 36.00, Current: 44.50, Delta: +8.50, Accepted: 1, Steps: 9"
   }
 }

@@ -62,7 +62,7 @@ def main():
 
     print("Running mini-L1 with combined_framework_fixes candidate...")
     print(f"  model: {model}")
-    print(f"  max_steps: {ml1.get('max_steps', 10)}")
+    print(f"  max_steps: {ml1.get('max_steps', 20)}")
     print(f"  train_sample_size: {train_sample_size}")
 
     run_seed = 42
@@ -72,7 +72,7 @@ def main():
         target_source_dir=source_dir,
         dataset_pickle_path=dpp,
         layer_level=1,
-        max_steps=ml1.get("max_steps", opt.get("max_steps", 10)),
+        max_steps=ml1.get("max_steps", opt.get("max_steps", 20)),
         n_samples=ml1.get("n_samples", opt.get("n_samples", 10)),
         max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 80)),
         max_no_improve_steps=ml1.get(

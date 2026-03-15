@@ -8,8 +8,8 @@ from pathlib import Path
 
 from dashboard.data import (
     RunRecord,
-    classify_children,
     build_run_snapshot,
+    classify_children,
     is_active_run,
     pick_default_run,
 )
@@ -139,6 +139,137 @@ class DashboardDataTests(unittest.TestCase):
             )
             self.assertEqual(snapshot["configured_provider"], "together")
             self.assertEqual(snapshot["configured_rpm_limit"], 55)
+
+    def test_snapshot_builds_train_validation_test_evaluation_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run-1"
+            source_dir = run_dir / "workspace" / "target_systems" / "pubmedqa"
+            meta_dir = source_dir / ".noa_meta"
+            (run_dir / "state").mkdir(parents=True)
+            meta_dir.mkdir(parents=True)
+
+            now = datetime(2026, 3, 12, 21, 0, 0, tzinfo=timezone.utc)
+            (run_dir / "state" / "current_run.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": "run-1",
+                        "status": "running",
+                        "updated_at": now.isoformat(),
+                        "source_dir": str(source_dir),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "state" / "children.json").write_text("[]", encoding="utf-8")
+            (run_dir / "state" / "heartbeats.json").write_text("[]", encoding="utf-8")
+
+            (meta_dir / "eval_patch_a.json").write_text(
+                json.dumps(
+                    {
+                        "details": [
+                            {
+                                "id": "PubMedQA_train_1",
+                                "question": "Train question",
+                                "ground_truth": "yes",
+                                "prediction": "Answer: yes",
+                                "extracted": "yes",
+                                "accuracy": 1.0,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (meta_dir / "validation_eval_step_3_patch_a.json").write_text(
+                json.dumps(
+                    {
+                        "details": [
+                            {
+                                "id": "PubMedQA_val_2",
+                                "question": "Validation question",
+                                "ground_truth": "no",
+                                "prediction": "Answer: no",
+                                "extracted": "no",
+                                "accuracy": 1.0,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (meta_dir / "test_eval_step_4_patch_a.json").write_text(
+                json.dumps(
+                    {
+                        "details": [
+                            {
+                                "id": "PubMedQA_test_3",
+                                "question": "Test question",
+                                "ground_truth": "maybe",
+                                "prediction": "Answer: maybe",
+                                "extracted": "maybe",
+                                "accuracy": 1.0,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            events = [
+                {
+                    "ts": now.isoformat(),
+                    "event": "eval_candidate",
+                    "label": "patch_a",
+                    "dataset_split": "train",
+                    "before_score": 40.0,
+                    "after_score": 60.0,
+                    "accepted": True,
+                    "rationale": "Improve train behavior",
+                    "ops": [{"op": "update", "file_path": "config.py"}],
+                    "detail_file": ".noa_meta/eval_patch_a.json",
+                },
+                {
+                    "ts": (now + timedelta(seconds=1)).isoformat(),
+                    "event": "validation_eval",
+                    "label": "patch_a",
+                    "dataset_split": "validation",
+                    "baseline_score": 55.0,
+                    "val_score": 61.0,
+                    "accepted": True,
+                    "rationale": "Validate candidate",
+                    "ops": [{"op": "update", "file_path": "config.py"}],
+                    "detail_file": ".noa_meta/validation_eval_step_3_patch_a.json",
+                },
+                {
+                    "ts": (now + timedelta(seconds=2)).isoformat(),
+                    "event": "test_eval_candidate",
+                    "label": "patch_a",
+                    "dataset_split": "test",
+                    "baseline_score": 58.0,
+                    "test_score": 64.0,
+                    "accepted": True,
+                    "rationale": "Held-out final check",
+                    "ops": [{"op": "update", "file_path": "config.py"}],
+                    "detail_file": ".noa_meta/test_eval_step_4_patch_a.json",
+                },
+            ]
+            (run_dir / "state" / "run_events.jsonl").write_text(
+                "\n".join(json.dumps(item) for item in events) + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = build_run_snapshot(
+                run_dir, now=now, pid_exists=lambda _pid: False
+            )
+            eval_rows = snapshot["evaluation_rows"]
+            self.assertEqual(
+                [row["split"] for row in eval_rows], ["test", "validation", "train"]
+            )
+            self.assertEqual(
+                eval_rows[0]["detail_rows"][0]["question"], "Test question"
+            )
+            self.assertEqual(eval_rows[1]["detail_rows"][0]["split"], "validation")
+            self.assertEqual(eval_rows[2]["detail_rows"][0]["split"], "train")
 
 
 class UnifiedAgentBatchEvalTests(unittest.TestCase):
@@ -298,6 +429,94 @@ class UnifiedAgentBatchEvalTests(unittest.TestCase):
             self.assertEqual(result["candidate_label"], "cand_only")
             self.assertNotEqual(result.get("mode"), "auto_batch")
             self.assertEqual(seen_labels, ["cand_only"])
+
+    def test_eval_candidate_history_records_train_detail_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            agent = self._make_agent(Path(tmp_dir))
+            agent._current_train_baseline = 50.0
+            agent.train_pool = [{"question": "q1"}]
+
+            agent._tool_checkpoint_candidate(
+                {
+                    "label": "cand_eval",
+                    "rationale": "candidate rationale",
+                    "ops": [
+                        {
+                            "op": "update",
+                            "file_path": "app.py",
+                            "search": "VALUE = 1",
+                            "replace": "VALUE = 2",
+                        }
+                    ],
+                }
+            )
+
+            agent.sandbox.eval_in_sandbox = lambda *args, **kwargs: {
+                "ok": True,
+                "score": 0.75,
+                "details": [
+                    {
+                        "id": "PubMedQA_train_1",
+                        "question": "Q",
+                        "prediction": "Answer: yes",
+                        "accuracy": 1.0,
+                    }
+                ],
+            }
+
+            result = agent._tool_eval_candidate({"label": "cand_eval"})
+
+            self.assertEqual(result["candidate_score"], 75.0)
+            history_entry = agent._history[-1]
+            self.assertEqual(history_entry["action"], "eval_candidate")
+            self.assertEqual(history_entry["dataset_split"], "train")
+            self.assertTrue(
+                history_entry["detail_file"].startswith(".noa_meta/eval_cand_eval")
+            )
+
+    def test_commit_best_before_observe_records_validation_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            agent = self._make_agent(Path(tmp_dir))
+            candidate_dir = Path(agent.sandbox._candidates_dir) / "cand_val"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            (candidate_dir / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+            agent._episode_counter = 1
+            agent._baseline_score = 60.0
+            agent.val_set = [{"question": "vq"}]
+            agent._top_candidates = [
+                {
+                    "label": "cand_val",
+                    "score": 70.0,
+                    "ops": [{"op": "update", "file_path": "app.py"}],
+                    "rationale": "validate this candidate",
+                }
+            ]
+            agent.eval_fn = lambda *args, **kwargs: {
+                "score": 0.55,
+                "details": [
+                    {
+                        "id": "PubMedQA_val_1",
+                        "question": "Validation Q",
+                        "prediction": "Answer: no",
+                        "accuracy": 1.0,
+                    }
+                ],
+            }
+
+            agent._commit_best_before_observe()
+
+            validation_entries = [
+                entry
+                for entry in agent._history
+                if entry.get("action") == "validation_eval"
+            ]
+            self.assertEqual(len(validation_entries), 1)
+            self.assertEqual(validation_entries[0]["dataset_split"], "validation")
+            self.assertTrue(
+                validation_entries[0]["detail_file"].startswith(
+                    ".noa_meta/validation_eval_step_"
+                )
+            )
 
 
 if __name__ == "__main__":

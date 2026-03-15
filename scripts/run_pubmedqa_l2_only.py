@@ -46,20 +46,35 @@ def main():
     source_dir = ws_source
     print(f"[PubMedQA L2-only] Workspace ready: {ws.run_dir}")
 
+    # 数据: 与 run_pubmedqa.py 保持一致的 train/val/test 三分
     total_n = data.get("total_n", 500)
-    test_n = data.get("test_n", 50)
+    test_n = data.get("test_n", 200)
+    val_n = data.get("val_n", 50)
     train_sample_size = data.get("train_sample_size", 10)
     split = data.get("split", "train")
 
+    # 并发限流 — 与 run_pubmedqa.py 保持一致
+    eval_max_workers = max(1, int(data.get("eval_max_workers", 25)))
+    global_eval_max_workers = max(
+        eval_max_workers,
+        int(data.get("global_eval_max_workers", 50)),
+    )
+    os.environ["NOA_EVAL_MAX_WORKERS"] = str(eval_max_workers)
+    os.environ["NOA_GLOBAL_EVAL_MAX_WORKERS"] = str(global_eval_max_workers)
+
     print(f"Loading PubMedQA data (total={total_n}, split={split})...")
-    all_data = load_pubmedqa(split=split, n=total_n, data_dir=source_dir)
+    all_data = load_pubmedqa(split=split, n=total_n)
 
     rng = random.Random(42)
     test_set = rng.sample(all_data, min(test_n, len(all_data)))
     test_ids = {id(x) for x in test_set}
-    train_pool = [x for x in all_data if id(x) not in test_ids]
+    remaining = [x for x in all_data if id(x) not in test_ids]
+    val_set = rng.sample(remaining, min(val_n, len(remaining)))
+    val_ids = {id(x) for x in val_set}
+    train_pool = [x for x in remaining if id(x) not in val_ids]
     dataset = train_pool
     print(f"Test set: {len(test_set)} samples (fixed seed=42)")
+    print(f"Val set: {len(val_set)} samples")
     print(
         f"Train pool: {len(train_pool)} samples (sample {train_sample_size} per round)"
     )
@@ -67,8 +82,10 @@ def main():
     cache_dir = os.path.join(str(project_root), ".noa_cache")
     dpp = serialize_dataset(dataset, cache_dir=cache_dir)
     train_pool_pp = serialize_dataset(train_pool, cache_dir=cache_dir)
+    val_set_pp = serialize_dataset(val_set, cache_dir=cache_dir)
     test_set_pp = serialize_dataset(test_set, cache_dir=cache_dir)
 
+    # 从上次运行结果构造 L1 历史
     l1_result = prev_results["rounds"][0]["l1_result"]
     baseline_score = prev_results["baseline_score"]
     final_score = prev_results["final_score"]
@@ -77,13 +94,10 @@ def main():
     parent_summary = (
         f"Initial: {baseline_score:.2f}, Current: {final_score:.2f}, "
         f"Delta: {final_score - baseline_score:+.2f}, "
-        f"Accepted: {len(parent_history)}"
+        f"Accepted: {l1_result.get('accepted', 0)}, Steps: {l1_result.get('steps', 0)}"
     )
 
     print(f"L1 context: {parent_summary}")
-    print(
-        f"L1 history actions: {[h.get('action', h.get('label', '?')) for h in parent_history]}"
-    )
 
     ml1 = spawn.get("mini_l1", {})
 
@@ -96,9 +110,9 @@ def main():
                 target_source_dir=source_dir,
                 dataset_pickle_path=dpp,
                 layer_level=1,
-                max_steps=ml1.get("max_steps", opt.get("max_steps", 10)),
+                max_steps=ml1.get("max_steps", opt.get("max_steps", 20)),
                 n_samples=ml1.get("n_samples", opt.get("n_samples", 10)),
-                max_llm_calls=ml1.get("max_llm_calls", opt.get("max_llm_calls", 80)),
+                max_llm_calls=ml1.get("max_llm_calls", 999999),
                 max_no_improve_steps=ml1.get(
                     "max_no_improve_steps", opt.get("max_no_improve_steps", 4)
                 ),
@@ -106,6 +120,7 @@ def main():
                 isolate_source=True,
                 random_seed=run_seed,
                 train_pool_pickle_path=train_pool_pp,
+                val_set_pickle_path=val_set_pp,
                 test_set_pickle_path=test_set_pp,
                 train_sample_size=train_sample_size,
                 top_k=opt.get("top_k", 3),
@@ -167,7 +182,7 @@ def main():
     print("Starting PubMedQA L2 meta-optimizer directly")
     print(f"  noa_dir: {noa_dir}")
     print(f"  model: {model}")
-    print(f"  max_steps: {l2_cfg.get('max_steps', 5)}")
+    print(f"  max_steps: {l2_cfg.get('max_steps', 10)}")
     print(f"  mini_l1 config: {ml1}")
     print(f"{'=' * 60}\n")
 
@@ -176,11 +191,11 @@ def main():
         target_factory=child_target_factory,
         dataset=child_dataset,
         eval_fn=child_eval_fn,
-        max_steps=l2_cfg.get("max_steps", 5),
+        max_steps=l2_cfg.get("max_steps", 10),
         n_samples=l2_cfg.get("n_samples", 1),
         model=model,
         score_fn=child_score_fn,
-        max_llm_calls=l2_cfg.get("max_llm_calls", 60),
+        max_llm_calls=l2_cfg.get("max_llm_calls", 999999),
         max_no_improve_steps=l2_cfg.get("max_no_improve_steps", 3),
         layer_context=child_layer_context,
         observer_search_roots=[noa_dir],

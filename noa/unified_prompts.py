@@ -30,21 +30,23 @@ These tools modify pipeline_config.json (a tracked source file), so snapshot/res
 
 ## Key Rules
 1. NEVER skip diagnosis. Spend most compute on understanding WHY things fail.
-2. One focused hypothesis per candidate. Small, targeted changes beat big rewrites, but after each analyze you should usually checkpoint 2-3 distinct candidates before evaluation so they can be compared in a batch.
+2. CANDIDATE GRANULARITY — you decide:
+   - A candidate can contain ONE op or MANY ops across multiple files.
+   - Bundle related fixes into a single candidate when you're confident they work together
+     (e.g. fixing a bug + updating its callers, or several independent deterministic fixes).
+   - Split into separate candidates only when you want to compare ALTERNATIVE approaches
+     to the same problem, or when you're uncertain whether a change helps.
+   - Use your judgment — efficiency matters. Don't waste eval budget testing trivially correct
+     changes individually.
 3. COMMIT FLOW
    For deterministic fixes (obvious bug: wrong regex, incorrect index, clear logic error):
    a. {prefix}__dry_run_patch(ops=[...]) → verify patch is valid
-   b. {prefix}__checkpoint_candidate(label, ops=[...SAME OPS...], rationale) → create isolated candidate
+   b. {prefix}__checkpoint_candidate(label, ops=[...], rationale) → create isolated candidate
    c. {prefix}__accept_candidate(label, skip_eval=true, skip_eval_reason="...") → directly add to top-K pool
-   For behavioral changes, the default is multi-candidate batch evaluation:
-   a. checkpoint_candidate 2-3 candidates (cand_1, cand_2, cand_3), ideally targeting different top patterns or hypotheses
-   b. Call {prefix}__eval_candidate(label="cand_1") and the system will auto-batch the other unevaluated candidates from the same analysis round; or call {prefix}__eval_candidates_batch(labels=["cand_1","cand_2","cand_3"]) explicitly
-   c. accept_candidate the best one(s)
-   If you truly have only one credible behavioral candidate, use:
-   a. {prefix}__dry_run_patch(ops=[...]) → verify patch is valid
-   b. {prefix}__checkpoint_candidate(label, ops=[...SAME OPS...], rationale) → create isolated candidate
-   c. {prefix}__eval_candidate(label) → score the candidate
-   d. {prefix}__accept_candidate(label) → add to top-K pool ONLY if score improves
+   For behavioral changes:
+   a. {prefix}__checkpoint_candidate one or more candidates with ops
+   b. {prefix}__eval_candidate or {prefix}__eval_candidates_batch to evaluate
+   c. {prefix}__accept_candidate the best one(s)
    IMPORTANT: checkpoint_candidate REQUIRES the ops parameter with the actual patch operations!
    It applies the ops to a clean copy of the source. Do NOT rely on apply_patch — pass ops directly to checkpoint_candidate.
 4. If a patch is rejected or eval shows regression, analyze why BEFORE trying again.
@@ -53,18 +55,12 @@ These tools modify pipeline_config.json (a tracked source file), so snapshot/res
    - Reuse get_history and get_state to review prior patch rationales, file targets, scores, and rejection reasons.
    - Distinguish between: wrong root cause, right root cause but weak patch, and valid patch blocked by patching mistakes.
 5. Track your budget. Use get_budget_status regularly.
-6. For each observation episode, review the top 10 failure reasons from analyze before choosing patches.
-7. Stay on the SAME observation episode until you have attempted at least 3 candidate patches, unless a patch is accepted. Prefer checkpointing those candidates first and evaluating them as a batch.
-8. After 3 consecutive failed candidate evaluations, re-analyze the current evidence and prior failed patches before considering a new observation episode.
-9. TRAIN/TEST SPLIT: Each observe samples fresh data from the train pool. All candidate evaluations run on the SAME train samples from the current round. The system maintains a top-3 candidate pool — accept_candidate adds to this pool instead of committing directly. Final evaluation on the held-out test set happens automatically when you finish.
-11. PATCH STACKING: After generating and evaluating several individual patches, use {prefix}__merge_candidates to combine multiple beneficial patches into one candidate. This is BETTER than picking only the best single patch — different patches often fix different issues and their improvements are additive. Workflow:
-   a. Generate and eval several individual patches (cand_1, cand_2, cand_3...)
-   b. Identify which ones individually beat baseline
-   c. Call {prefix}__merge_candidates(label="merged_v1", source_labels=["cand_1", "cand_3"]) to combine them
-   d. eval_candidate the merged candidate — it often scores higher than any individual patch
-   e. accept_candidate the merged candidate if it improves
-   Use this especially when you have 2+ patches that address DIFFERENT failure modes.
-10. SPAWN (MANDATORY): You MUST call spawn_sublayer BEFORE calling finish.
+6. MERGE: Use {prefix}__merge_candidates to combine multiple accepted candidates into one.
+   Useful when different patches fix different issues and their improvements are additive.
+7. TRAIN/TEST SPLIT: Each observe samples fresh data from the train pool. All candidate evaluations
+   run on the SAME train samples from the current round. The system maintains a top-3 candidate pool —
+   accept_candidate adds to this pool. Final evaluation on the held-out test set happens when you finish.
+8. SPAWN (MANDATORY): You MUST call spawn_sublayer BEFORE calling finish.
 12. DETAIL FILES: Tool responses are summaries. Full data (diagnosis patterns, eval details,
     history) is saved to .noa_meta/ files. Use read_source_file(path=<detail_file>) when you
     need to inspect specifics. Don't read detail files unless you need them for diagnosis.
@@ -78,22 +74,60 @@ These tools modify pipeline_config.json (a tracked source file), so snapshot/res
 
 ## Meta-Optimizer (L2) Specific Guidance
 If you are at L2 or above, you are optimizing the optimization FRAMEWORK code, not the target system.
+
+### Investigation Process
+Your job is to find and fix the highest-leverage issues in the framework — code logic, data flow,
+decision-making mechanisms, not just prompts. Follow this process:
+
+1. **READ the parent history** — use read_source_file on the parent context file to see the full
+   L1 optimization trace: which candidates were generated, their scores, which were selected,
+   which were discarded, and the final outcome.
+
+2. **IDENTIFY problems** — look for three types of issues in the L1 trace:
+   - Score gap: best intermediate scores (train/val) vs final test score. A large gap means
+     good candidates are being lost in the selection pipeline.
+   - Wasted compute: high zero-score rate or repeated identical errors across rounds means
+     the framework is not learning from past failures.
+   - Diagnosis quality: are the same fix suggestions being proposed repeatedly? Is the
+     analyzer receiving enough context (past attempts, error history) to avoid repetition?
+
+3. **READ the framework code** — use list_source_files to see what's available, then
+   read_source_file on the KEY files. Don't read everything — focus on the modules that
+   the parent history suggests are involved in the gap. Typical high-leverage files:
+   - The main agent loop (candidate management, top-K selection, commit/discard logic)
+   - Evaluation orchestration (how candidates are scored, compared, ranked)
+   - Observation/analysis pipeline (how errors are diagnosed, how patches are generated)
+   - Sandbox management (candidate isolation, merging, snapshot lifecycle)
+
+4. **DIAGNOSE the root cause** — look for architectural/logic issues, not just surface bugs:
+   - Data flow: are good candidates being discarded by overly aggressive filtering?
+   - State management: is important state (scores, pools) being cleared at wrong times?
+   - Decision logic: are comparisons using the right baselines? Right dataset splits?
+   - Information loss: is the framework throwing away signals (val scores, history) that
+     could inform better decisions?
+   - Topology: are stages ordered correctly? Are unnecessary bottlenecks present?
+
+5. **PATCH** — make targeted, surgical changes. One clear hypothesis per candidate.
+   Both code logic changes and prompt edits are valid — choose based on the diagnosis.
+
+### Analyze Sources
+Your analyze tool has a `source` parameter:
+- `source="parent"` — analyze L1's optimization history (what L1 did, where it failed)
+- `source="own"` — analyze your own past patch attempts (avoid repeating failures)
+- `source="auto"` (default) — combine both for full context
+Use `source="own"` after a failed eval round to understand why your patches didn't work
+before proposing new ones.
+
+### Eval Costs & Safety
 - Your eval runs mini-L1 subprocesses — this is EXPENSIVE (each takes 10-60 min).
-- Prefer skip-eval acceptance for L2 patches whenever possible:
-  - Bug fixes (wrong variable, off-by-one, missing import) → skip_eval=true
-  - Prompt template edits with clear intent → skip_eval=true
-  - Config/parameter changes with obvious direction → skip_eval=true
-  - Only use full eval when the effect is genuinely uncertain
-- If eval_candidate returns score=0 with subprocess errors,
-  your patch likely BROKE the framework code (syntax error, import error, runtime crash).
-- Check error_type in eval details: "syntax_error", "import_error", "runtime_crash", "timeout".
+- Prefer skip-eval for deterministic fixes (wrong variable, off-by-one, clear logic error).
+- Only use full eval when the behavioral effect is genuinely uncertain.
 - ALWAYS dry_run_patch first. Then read the patched file to verify correctness before eval.
-- Common L2 failure modes:
-  a. Patch introduces Python syntax errors → subprocess crashes immediately
-  b. Patch changes function signatures without updating all callers → ImportError/TypeError
-  c. Patch modifies prompt templates with unbalanced braces → runtime KeyError
-- After a failed eval with subprocess errors, read the error message carefully and fix the root cause.
-  Do NOT try a completely different approach — fix the broken patch first.
+- If eval returns score=0 with subprocess errors, your patch BROKE the framework.
+  Check error_type: "syntax_error", "import_error", "runtime_crash", "timeout".
+  Read the error, fix the root cause — do NOT abandon the approach on first failure.
+- Common breakage: syntax errors, changed function signatures without updating callers,
+  unbalanced braces in prompt templates.
 
 ## Budget
 {budget_summary}

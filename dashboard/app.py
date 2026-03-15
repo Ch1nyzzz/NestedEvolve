@@ -208,6 +208,97 @@ def _render_candidates(snapshot: dict) -> None:
                 st.code(preview, language="diff")
 
 
+def _render_evaluations(snapshot: dict) -> None:
+    rows = snapshot.get("evaluation_rows", [])
+    if not rows:
+        st.info("No structured train/validation/test evaluation records yet.")
+        return
+
+    ledger = pd.DataFrame(
+        [
+            {
+                "ts": row.get("ts"),
+                "label": row.get("label"),
+                "split": row.get("split"),
+                "score": row.get("score"),
+                "baseline": row.get("baseline_score"),
+                "delta": row.get("delta"),
+                "samples": row.get("n_samples"),
+                "accepted": row.get("accepted"),
+                "error": row.get("error") or "",
+            }
+            for row in rows
+        ]
+    )
+    st.dataframe(ledger, use_container_width=True, hide_index=True)
+
+    for row in rows:
+        title = (
+            f"{row.get('label')} | {row.get('split')} | "
+            f"score={row.get('score') if row.get('score') is not None else 'n/a'}"
+        )
+        with st.expander(title, expanded=False):
+            meta_cols = st.columns(6)
+            meta_cols[0].metric("Split", row.get("split", "-"))
+            meta_cols[1].metric(
+                "Score", row.get("score") if row.get("score") is not None else "n/a"
+            )
+            meta_cols[2].metric(
+                "Baseline",
+                row.get("baseline_score")
+                if row.get("baseline_score") is not None
+                else "n/a",
+            )
+            meta_cols[3].metric(
+                "Delta", row.get("delta") if row.get("delta") is not None else "n/a"
+            )
+            meta_cols[4].metric("Samples", row.get("n_samples") or 0)
+            meta_cols[5].metric(
+                "Accepted",
+                row.get("accepted") if row.get("accepted") is not None else "-",
+            )
+
+            if row.get("train_score") is not None:
+                st.caption(f"Train score before held-out eval: {row['train_score']}")
+            if row.get("rationale"):
+                st.write("Why this patch was tested")
+                st.caption(row["rationale"])
+            if row.get("error"):
+                st.error(str(row["error"]))
+
+            detail_summary = row.get("detail_summary") or []
+            if detail_summary:
+                st.write("Per-split detail summary")
+                st.dataframe(
+                    pd.DataFrame(detail_summary),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            preview = patch_preview_from_ops(row.get("ops", []))
+            if preview:
+                st.write("Patch")
+                st.code(preview, language="diff")
+
+            detail_rows = row.get("detail_rows") or []
+            if detail_rows:
+                detail_frame = pd.DataFrame(detail_rows).reindex(
+                    columns=[
+                        "split",
+                        "sample_id",
+                        "question",
+                        "ground_truth",
+                        "extracted",
+                        "score",
+                        "prediction_preview",
+                    ]
+                )
+                st.write("Sample-level eval details")
+                st.dataframe(detail_frame, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No sample-level detail file recorded for this eval.")
+
+
 def main() -> None:
     st.set_page_config(page_title="NOA Runtime Dashboard", layout="wide")
     st.title("NOA Runtime Dashboard")
@@ -264,6 +355,9 @@ def main() -> None:
 
     st.subheader("Timeline")
     _render_timeline(snapshot)
+
+    st.subheader("Evaluation Ledger")
+    _render_evaluations(snapshot)
 
     st.subheader("Candidates")
     _render_candidates(snapshot)

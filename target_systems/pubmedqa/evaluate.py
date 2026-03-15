@@ -13,8 +13,8 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-DEFAULT_MAX_WORKERS = 25
-DEFAULT_GLOBAL_MAX_WORKERS = 50
+DEFAULT_MAX_WORKERS = 200
+DEFAULT_GLOBAL_MAX_WORKERS = 400
 _GLOBAL_SLOT_DIR = Path(tempfile.gettempdir()) / "noa_pubmedqa_eval_slots"
 
 
@@ -104,7 +104,7 @@ def _acquire_global_eval_slot(global_limit: int):
 def evaluate_batch(
     pipeline,
     dataset: list,
-    max_workers: int = 25,
+    max_workers: int = 100,
 ) -> dict:
     """并行评估 pipeline，返回 accuracy + per_example 详情。"""
     if not dataset:

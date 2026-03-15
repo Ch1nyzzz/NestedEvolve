@@ -711,55 +711,65 @@ def _run_fresh_observe(
     seed: int,
     score_fn,
     required_intermediate_keys: list[str] | None = None,
+    max_workers: int = 200,
 ) -> list[Trajectory]:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     rng = random.Random(seed)
     sampled = rng.sample(dataset, min(n_samples, len(dataset)))
-
-    trajectories: list[Trajectory] = []
     total = len(sampled)
-    correct = 0
-    print(f"[FreshObserve] Running {total} samples...")
-    for i, ex in enumerate(sampled):
+    print(
+        f"[FreshObserve] Running {total} samples (parallel, workers={min(max_workers, total)})..."
+    )
+
+    def _run_one(ex):
         try:
             kwargs = {"question": ex.question}
             if getattr(ex, "context", ""):
                 kwargs["context"] = ex.context
             result = target(**kwargs)
             score = score_fn(result.answer, ex.answer)
-            if score > 0:
-                correct += 1
-            trajectories.append(
-                Trajectory(
-                    question=ex.question,
-                    ground_truth=ex.answer,
-                    prediction=result.answer,
-                    f1=float(score),
-                    intermediate=result.intermediate
+            return Trajectory(
+                question=ex.question,
+                ground_truth=ex.answer,
+                prediction=result.answer,
+                f1=float(score),
+                intermediate=result.intermediate
+                if isinstance(result.intermediate, dict)
+                else {},
+                trace_source="fresh",
+                intermediate_complete=_is_intermediate_complete(
+                    result.intermediate
                     if isinstance(result.intermediate, dict)
                     else {},
-                    trace_source="fresh",
-                    intermediate_complete=_is_intermediate_complete(
-                        result.intermediate
-                        if isinstance(result.intermediate, dict)
-                        else {},
-                        required_intermediate_keys,
-                    ),
-                )
+                    required_intermediate_keys,
+                ),
             )
         except Exception:
-            trajectories.append(
-                Trajectory(
-                    question=ex.question,
-                    ground_truth=ex.answer,
-                    prediction="",
-                    f1=0.0,
-                    error=traceback.format_exc(),
-                    trace_source="fresh",
-                    intermediate_complete=False,
-                )
+            return Trajectory(
+                question=ex.question,
+                ground_truth=ex.answer,
+                prediction="",
+                f1=0.0,
+                error=traceback.format_exc(),
+                trace_source="fresh",
+                intermediate_complete=False,
             )
-        if (i + 1) % 5 == 0 or i + 1 == total:
-            print(f"[FreshObserve] {i+1}/{total} done (correct so far: {correct})")
+
+    trajectories: list[Trajectory] = [None] * total
+    done = 0
+    correct = 0
+    with ThreadPoolExecutor(max_workers=min(max_workers, total)) as pool:
+        futures = {pool.submit(_run_one, ex): i for i, ex in enumerate(sampled)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            traj = fut.result()
+            trajectories[idx] = traj
+            done += 1
+            if traj.f1 > 0:
+                correct += 1
+            if done % 5 == 0 or done == total:
+                print(f"[FreshObserve] {done}/{total} done (correct so far: {correct})")
     print(f"[FreshObserve] Finished: {correct}/{total} correct")
     return trajectories
 

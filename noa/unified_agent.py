@@ -444,6 +444,16 @@ class UnifiedOptimizerAgent:
             print(
                 f"[Baseline] test_set ({len(self.test_set)} samples) score={self._test_baseline_score:.2f}"
             )
+            self._push_history(
+                {
+                    "action": "baseline_eval",
+                    "step": 0,
+                    "label": "baseline",
+                    "dataset_split": "test",
+                    "score": round(self._test_baseline_score, 2),
+                    "n_samples": len(self.test_set),
+                }
+            )
         except Exception as e:
             log.error(f"[Baseline] test_set failed: {e}")
             self._test_baseline_score = 0.0
@@ -455,6 +465,16 @@ class UnifiedOptimizerAgent:
                 self._val_baseline_score = vs * 100 if vs <= 1 else vs
                 print(
                     f"[Baseline] val_set ({len(self.val_set)} samples) score={self._val_baseline_score:.2f}"
+                )
+                self._push_history(
+                    {
+                        "action": "baseline_eval",
+                        "step": 0,
+                        "label": "baseline",
+                        "dataset_split": "validation",
+                        "score": round(self._val_baseline_score, 2),
+                        "n_samples": len(self.val_set),
+                    }
                 )
             except Exception as e:
                 log.error(f"[Baseline] val_set failed: {e}")
@@ -482,12 +502,58 @@ class UnifiedOptimizerAgent:
             )
             return None
 
+        test_baseline = (
+            self._test_baseline_score
+            if self._test_baseline_score > 0
+            else self._baseline_score
+        )
+
+        def _record_test_eval_result(
+            cand: dict, final_score: float, result: dict | None
+        ) -> str | None:
+            detail_file = None
+            payload = {}
+            if isinstance(result, dict):
+                details = result.get("details", [])
+                if details:
+                    payload["details"] = details
+                subprocess_errors = result.get("subprocess_errors", [])
+                if subprocess_errors:
+                    payload["subprocess_errors"] = subprocess_errors
+                if result.get("error"):
+                    payload["error"] = result.get("error")
+            if payload:
+                detail_file = self._write_detail_file(
+                    f"test_eval_step_{self._step_count}_{cand['label']}.json",
+                    payload,
+                )
+            self._push_history(
+                {
+                    "action": "test_eval_candidate",
+                    "step": self._step_count,
+                    "trigger": trigger,
+                    "label": cand["label"],
+                    "dataset_split": "test",
+                    "n_samples": len(self.test_set),
+                    "rationale": cand.get("rationale", ""),
+                    "ops": cand.get("ops", []),
+                    "train_score": round(cand.get("score", 0), 2),
+                    "baseline_score": round(test_baseline, 2),
+                    "test_score": round(final_score, 2),
+                    "accepted": final_score > test_baseline,
+                    "error": result.get("error") if isinstance(result, dict) else None,
+                    "detail_file": detail_file,
+                }
+            )
+            return detail_file
+
         # L2+ 层: eval_candidate 返回的分数已经是 mini-L1 的 test_set final eval，
         # 再跑一次 FinalEval 只会引入随机噪声。直接用已有分数 commit 最优。
         if self.layer_context and self.layer_context.level >= 2:
             best_cand = max(self._top_candidates, key=lambda c: c["score"])
             best_label = best_cand["label"]
             best_score = best_cand["score"]
+            best_detail_file = _record_test_eval_result(best_cand, best_score, None)
             if best_score > self._baseline_score:
                 print(
                     f"\n[FinalEval] L2+ skip re-eval: committing {best_label} "
@@ -511,6 +577,7 @@ class UnifiedOptimizerAgent:
                         "test_score": round(best_score, 2),
                         "baseline_score": round(self._baseline_score, 2),
                         "l2_skip_reeval": True,
+                        "detail_file": best_detail_file,
                     }
                 )
                 return {"label": best_label, "test_score": best_score}
@@ -544,6 +611,7 @@ class UnifiedOptimizerAgent:
             valid_cands.append((cand, candidate_dir))
 
         best_label, best_score = None, self._test_baseline_score
+        test_detail_files: dict[str, str | None] = {}
         if len(valid_cands) > 1:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -559,12 +627,16 @@ class UnifiedOptimizerAgent:
                     inline=True,
                 )
                 score = result.get("score", 0)
-                return cand, score * 100 if score <= 1 else score
+                normalized = score * 100 if score <= 1 else score
+                return cand, normalized, result
 
             with ThreadPoolExecutor(max_workers=len(valid_cands)) as pool:
                 futures = {pool.submit(_eval_one, item): item for item in valid_cands}
                 for fut in as_completed(futures):
-                    cand, final_score = fut.result()
+                    cand, final_score, result = fut.result()
+                    test_detail_files[cand["label"]] = _record_test_eval_result(
+                        cand, final_score, result
+                    )
                     print(
                         f"  [FinalEval] {cand['label']}: test_score={final_score:.2f} "
                         f"(train_score={cand['score']:.2f})"
@@ -584,6 +656,9 @@ class UnifiedOptimizerAgent:
             )
             score = result.get("score", 0)
             final_score = score * 100 if score <= 1 else score
+            test_detail_files[cand["label"]] = _record_test_eval_result(
+                cand, final_score, result
+            )
             print(
                 f"  [FinalEval] {cand['label']}: test_score={final_score:.2f} "
                 f"(train_score={cand['score']:.2f})"
@@ -612,6 +687,7 @@ class UnifiedOptimizerAgent:
                     "label": best_label,
                     "test_score": round(best_score, 2),
                     "baseline_score": round(self._baseline_score, 2),
+                    "detail_file": test_detail_files.get(best_label),
                 }
             )
             return {"label": best_label, "test_score": best_score}
@@ -1093,15 +1169,29 @@ class UnifiedOptimizerAgent:
         )
 
         # C. 诊断
-        tools.append(
-            _tool(
-                f"{p}__analyze",
-                "Run error diagnosis on collected trajectories.",
-                {
-                    "top_n": {"type": "integer", "default": 10},
-                },
+        _analyze_props = {
+            "top_n": {"type": "integer", "default": 10},
+        }
+        _analyze_desc = "Run error diagnosis on collected trajectories."
+        if self.layer_context and self.layer_context.level >= 2:
+            _analyze_props["source"] = {
+                "type": "string",
+                "enum": ["auto", "parent", "own"],
+                "default": "auto",
+                "description": (
+                    "Which history to analyze. "
+                    "'parent'=L1 optimization history (useful for first diagnosis). "
+                    "'own'=your own eval/checkpoint history (useful to review past failures). "
+                    "'auto'=combine both (default)."
+                ),
+            }
+            _analyze_desc = (
+                "Run diagnosis on optimization history. "
+                "Use source='parent' to analyze L1's run, "
+                "'own' to review your past patch attempts, "
+                "or 'auto' to combine both."
             )
-        )
+        tools.append(_tool(f"{p}__analyze", _analyze_desc, _analyze_props))
         tools.append(
             _tool(
                 f"{p}__compare_episodes",
@@ -1587,13 +1677,45 @@ class UnifiedOptimizerAgent:
                 self._candidate_scores.clear()
                 return
             tmp_target = self.target_factory(candidate_dir)
+            val_details = []
+            val_error = None
             try:
                 val_result = self.eval_fn(tmp_target, self.val_set)
                 val_score = val_result["score"]
                 val_score = val_score * 100 if val_score <= 1 else val_score
+                val_details = val_result.get("details", [])
             except Exception as e:
                 log.warning("[Observe] val_set eval failed: %s", e)
                 val_score = 0.0
+                val_error = str(e)
+            val_detail_file = None
+            if val_details or val_error:
+                val_detail_payload = {}
+                if val_details:
+                    val_detail_payload["details"] = val_details
+                if val_error:
+                    val_detail_payload["error"] = val_error
+                val_detail_file = self._write_detail_file(
+                    f"validation_eval_step_{self._step_count}_{best_label}.json",
+                    val_detail_payload,
+                )
+            self._push_history(
+                {
+                    "action": "validation_eval",
+                    "step": self._step_count,
+                    "label": best_label,
+                    "dataset_split": "validation",
+                    "n_samples": len(self.val_set),
+                    "rationale": best_cand.get("rationale", ""),
+                    "ops": best_cand.get("ops", []),
+                    "train_score": round(best_cand["score"], 2),
+                    "baseline_score": round(self._baseline_score, 2),
+                    "val_score": round(val_score, 2),
+                    "accepted": val_score > self._baseline_score,
+                    "error": val_error,
+                    "detail_file": val_detail_file,
+                }
+            )
             print(
                 f"\n[Observe] Val eval candidate '{best_label}': "
                 f"val_score={val_score:.2f}, baseline={self._baseline_score:.2f}"
@@ -1641,29 +1763,28 @@ class UnifiedOptimizerAgent:
 
     def _run_fresh_observe_inline(self, samples: list) -> list:
         """对缺失样本直接跑 target，收集轨迹（不走 agentic observer）。"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from noa.core.protocol import Trajectory
 
-        trajs = []
         total = len(samples)
-        print(f"[FreshObserve:inline] Running {total} samples...")
-        for i, sample in enumerate(samples):
+        print(f"[FreshObserve:inline] Running {total} samples (parallel)...")
+
+        def _run_one(sample):
             try:
                 kwargs = {"question": sample.question}
                 if getattr(sample, "context", ""):
                     kwargs["context"] = sample.context
                 result = self.target(**kwargs)
                 score = self.score_fn(result.answer, sample.answer)
-                trajs.append(
-                    Trajectory(
-                        question=sample.question,
-                        ground_truth=sample.answer,
-                        prediction=result.answer,
-                        f1=float(score),
-                        intermediate=result.intermediate
-                        if isinstance(result.intermediate, dict)
-                        else {},
-                        trace_source="cache_topup",
-                    )
+                return Trajectory(
+                    question=sample.question,
+                    ground_truth=sample.answer,
+                    prediction=result.answer,
+                    f1=float(score),
+                    intermediate=result.intermediate
+                    if isinstance(result.intermediate, dict)
+                    else {},
+                    trace_source="cache_topup",
                 )
             except Exception as e:
                 log.warning(
@@ -1671,18 +1792,25 @@ class UnifiedOptimizerAgent:
                     getattr(sample, "question", "?")[:50],
                     e,
                 )
-                trajs.append(
-                    Trajectory(
-                        question=getattr(sample, "question", ""),
-                        ground_truth=getattr(sample, "answer", ""),
-                        prediction="",
-                        f1=0.0,
-                        intermediate={},
-                        trace_source="cache_topup_error",
-                    )
+                return Trajectory(
+                    question=getattr(sample, "question", ""),
+                    ground_truth=getattr(sample, "answer", ""),
+                    prediction="",
+                    f1=0.0,
+                    intermediate={},
+                    trace_source="cache_topup_error",
                 )
-            if (i + 1) % 5 == 0 or i + 1 == total:
-                print(f"[FreshObserve:inline] {i+1}/{total} done")
+
+        trajs = [None] * total
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(200, total)) as pool:
+            futures = {pool.submit(_run_one, s): i for i, s in enumerate(samples)}
+            for fut in as_completed(futures):
+                idx = futures[fut]
+                trajs[idx] = fut.result()
+                done += 1
+                if done % 5 == 0 or done == total:
+                    print(f"[FreshObserve:inline] {done}/{total} done")
         return trajs
 
     def _tool_run_observe(self, args: dict) -> dict:
@@ -2037,6 +2165,7 @@ class UnifiedOptimizerAgent:
                 layer_context=layer_context_text,
             )
         elif self.layer_context and self.layer_context.level >= 2:
+            source = args.get("source", "auto")
             own_meta_history = [
                 h
                 for h in self._history
@@ -2054,28 +2183,31 @@ class UnifiedOptimizerAgent:
                     "final_eval_skipped",
                 )
             ]
-            if own_meta_history:
-                diagnosis = analyze_history_records(
-                    self.sys_desc,
-                    own_meta_history,
-                    model=self.model,
-                    top_n=top_n,
-                    layer_context=layer_context_text,
-                    parent_summary=self.layer_context.parent_summary,
-                    history_source="own_eval_history",
-                )
-            elif self.layer_context.parent_history:
-                diagnosis = analyze_history_records(
-                    self.sys_desc,
-                    self.layer_context.parent_history,
-                    model=self.model,
-                    top_n=top_n,
-                    layer_context=layer_context_text,
-                    parent_summary=self.layer_context.parent_summary,
-                    history_source="parent_history",
-                )
+            # source="parent" 强制用 parent_history; "own" 强制用 own;
+            # "auto" 两者合并（own 在前，parent 在后）
+            if source == "parent":
+                records = list(self.layer_context.parent_history or [])
+                history_source = "parent_history"
+            elif source == "own":
+                records = own_meta_history
+                history_source = "own_eval_history"
             else:
+                # auto: 合并两者，给 analyzer 完整上下文
+                records = (
+                    list(self.layer_context.parent_history or []) + own_meta_history
+                )
+                history_source = "combined"
+            if not records:
                 return {"error": "No trajectories or meta-history. Run observe first."}
+            diagnosis = analyze_history_records(
+                self.sys_desc,
+                records,
+                model=self.model,
+                top_n=top_n,
+                layer_context=layer_context_text,
+                parent_summary=self.layer_context.parent_summary,
+                history_source=history_source,
+            )
         else:
             return {"error": "No trajectories. Run observe first."}
 
@@ -2343,8 +2475,8 @@ class UnifiedOptimizerAgent:
             {
                 "op": op.op,
                 "file_path": op.file_path,
-                "search": (op.search or "")[:100],
-                "replace": (op.replace or "")[:100],
+                "search": (op.search or "")[:1000],
+                "replace": (op.replace or "")[:1000],
             }
             for op in ops
         ]
@@ -2489,6 +2621,7 @@ class UnifiedOptimizerAgent:
                     "step": self._step_count,
                     "label": label,
                     "mode": "cached",
+                    "dataset_split": "train",
                     "rationale": candidate_meta.get("rationale", ""),
                     "ops": candidate_meta.get("ops", []),
                     "before_score": cached.get("baseline_score", 0),
@@ -2496,6 +2629,7 @@ class UnifiedOptimizerAgent:
                     "accepted": cached.get("candidate_score", 0)
                     > cached.get("baseline_score", 0),
                     "cached": True,
+                    "detail_file": cached.get("detail_file"),
                 }
             )
             return {**cached, "cached": True, "ok": True}
@@ -2551,21 +2685,6 @@ class UnifiedOptimizerAgent:
         eval_error = result.get("error")
         if not eval_error and subprocess_errors:
             eval_error = f"subprocess_crash: {subprocess_errors[0][:1000]}"
-        self._push_history(
-            {
-                "action": "eval_candidate",
-                "step": self._step_count,
-                "label": label,
-                "mode": mode,
-                "rationale": candidate_meta.get("rationale", ""),
-                "ops": candidate_meta.get("ops", []),
-                "before_score": round(train_baseline, 2),
-                "after_score": round(normalized_score, 2),
-                "accepted": accepted,
-                "details_count": len(result.get("details", [])),
-                "error": eval_error,
-            }
-        )
         # 完整 details + subprocess_errors 写入 detail 文件
         detail_payload = {}
         details = result.get("details", [])
@@ -2576,6 +2695,24 @@ class UnifiedOptimizerAgent:
         detail_file = None
         if detail_payload:
             detail_file = self._write_detail_file(f"eval_{label}.json", detail_payload)
+        self._push_history(
+            {
+                "action": "eval_candidate",
+                "step": self._step_count,
+                "label": label,
+                "mode": mode,
+                "dataset_split": "train",
+                "n_samples": len(val_data) if val_data else 0,
+                "rationale": candidate_meta.get("rationale", ""),
+                "ops": candidate_meta.get("ops", []),
+                "before_score": round(train_baseline, 2),
+                "after_score": round(normalized_score, 2),
+                "accepted": accepted,
+                "details_count": len(result.get("details", [])),
+                "error": eval_error,
+                "detail_file": detail_file,
+            }
+        )
 
         # L2: 提取 mini-L1 信息写独立文件
         mini_l1_file = None
@@ -2633,6 +2770,7 @@ class UnifiedOptimizerAgent:
                 "baseline_score": train_baseline,
                 "next_action": next_action,
                 "error": eval_error,
+                "detail_file": detail_file,
             }
         return slim_result
 
@@ -2703,10 +2841,10 @@ class UnifiedOptimizerAgent:
             )
 
         # 限制批量候选评估并发，避免 mini-L1 的内部 worker 并发相乘。
-        per_eval_limit = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "25")))
+        per_eval_limit = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "100")))
         global_eval_limit = max(
             per_eval_limit,
-            int(os.getenv("NOA_GLOBAL_EVAL_MAX_WORKERS", "50")),
+            int(os.getenv("NOA_GLOBAL_EVAL_MAX_WORKERS", "200")),
         )
         batch_parallelism = max(1, global_eval_limit // per_eval_limit)
 

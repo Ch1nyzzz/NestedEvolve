@@ -189,7 +189,7 @@ def run_layer_subprocess(
         else:
             raise RuntimeError(f"evaluate.py not found at {{l0_source_dir}}")
 
-        eval_workers = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "25")))
+        eval_workers = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "100")))
 
         optimizer = NOptimizer(
             source_dir=l0_source_dir,
