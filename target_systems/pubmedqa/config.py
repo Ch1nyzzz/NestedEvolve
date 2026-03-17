@@ -11,7 +11,7 @@ from utils.llm import resolve_model
 
 # 可选模型列表 — 仅包含默认输出模型，优化集中在算法/prompt 层面
 MODELS_LIST = [
-    "together_ai/Qwen/Qwen3.5-9B",
+    "together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo",
 ]
 
 
@@ -19,7 +19,7 @@ MODELS_LIST = [
 class ComponentConfig:
     name: str
     prompt_template: str
-    model: str = resolve_model("together_ai/Qwen/Qwen3.5-9B")
+    model: str = resolve_model("together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo")
     max_tokens: int = 2048
     temperature: float = 0.0
 
@@ -27,7 +27,7 @@ class ComponentConfig:
 @dataclass
 class ModelSelectorConfig:
     name: str
-    selected_model: str = "together_ai/Qwen/Qwen3.5-9B"
+    selected_model: str = "together_ai/Qwen/Qwen2.5-7B-Instruct-Turbo"
     models_list: list[str] = field(default_factory=lambda: list(MODELS_LIST))
 
 

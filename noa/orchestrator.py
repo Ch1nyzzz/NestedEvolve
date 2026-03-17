@@ -31,7 +31,7 @@ class Orchestrator:
         eval_fn,
         score_fn,
         *,
-        l1_max_steps: int = 20,
+        l1_max_steps: int = 10,
         l1_n_samples: int = 20,
         l1_model: str = DEFAULT_MODEL,
         l1_max_llm_calls: int = 999999,

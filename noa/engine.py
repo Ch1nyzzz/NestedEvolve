@@ -21,7 +21,7 @@ class NOptimizer:
         dataset: list,
         eval_fn,
         *,
-        max_steps: int = 20,
+        max_steps: int = 10,
         n_samples: int = 20,
         model: str = DEFAULT_MODEL,
         system_description: str = "",

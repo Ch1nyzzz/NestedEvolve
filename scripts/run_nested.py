@@ -73,7 +73,7 @@ def main():
         dataset=train_pool,
         eval_fn=lambda t, d: evaluate_batch(t, d, max_workers=50),
         score_fn=f1_score,
-        l1_max_steps=opt.get("max_steps", 20),
+        l1_max_steps=opt.get("max_steps", 10),
         l1_n_samples=opt.get("n_samples", 50),
         l1_model=model,
         l1_max_llm_calls=opt.get("max_llm_calls", 80),

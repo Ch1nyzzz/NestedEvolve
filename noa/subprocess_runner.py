@@ -81,7 +81,7 @@ def run_layer_subprocess(
     target_source_dir: str,
     dataset_pickle_path: str,
     layer_level: int = 1,
-    max_steps: int = 20,
+    max_steps: int = 10,
     n_samples: int = 20,
     model: str = "gpt-4.1-mini",
     timeout: int = 28800,
@@ -189,7 +189,7 @@ def run_layer_subprocess(
         else:
             raise RuntimeError(f"evaluate.py not found at {{l0_source_dir}}")
 
-        eval_workers = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "100")))
+        eval_workers = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "50")))
 
         optimizer = NOptimizer(
             source_dir=l0_source_dir,

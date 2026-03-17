@@ -537,7 +537,7 @@ def _severity_rank(s: str) -> int:
 class OptimizationBudget:
     """优化预算 — 控制步数、LLM 调用、评估次数。"""
 
-    max_steps: int = 20
+    max_steps: int = 10
     max_llm_calls: int = 999999
     max_no_improve_steps: int = 5
     target_delta: float = float("inf")

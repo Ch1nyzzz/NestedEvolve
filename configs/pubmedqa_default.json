@@ -7,7 +7,7 @@
     "split": "train"
   },
   "optimizer": {
-    "max_steps": 20,
+    "max_steps": 10,
     "n_samples": 30,
     "provider": "together_ai",
     "model": "MiniMaxAI/MiniMax-M2.5",

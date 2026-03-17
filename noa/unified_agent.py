@@ -1854,7 +1854,7 @@ class UnifiedOptimizerAgent:
 
         trajs = [None] * total
         done = 0
-        with ThreadPoolExecutor(max_workers=min(200, total)) as pool:
+        with ThreadPoolExecutor(max_workers=min(50, total)) as pool:
             futures = {pool.submit(_run_one, s): i for i, s in enumerate(samples)}
             for fut in as_completed(futures):
                 idx = futures[fut]
@@ -2897,10 +2897,10 @@ class UnifiedOptimizerAgent:
             )
 
         # 限制批量候选评估并发，避免 mini-L1 的内部 worker 并发相乘。
-        per_eval_limit = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "100")))
+        per_eval_limit = max(1, int(os.getenv("NOA_EVAL_MAX_WORKERS", "50")))
         global_eval_limit = max(
             per_eval_limit,
-            int(os.getenv("NOA_GLOBAL_EVAL_MAX_WORKERS", "200")),
+            int(os.getenv("NOA_GLOBAL_EVAL_MAX_WORKERS", "100")),
         )
         batch_parallelism = max(1, global_eval_limit // per_eval_limit)
 

@@ -711,7 +711,7 @@ def _run_fresh_observe(
     seed: int,
     score_fn,
     required_intermediate_keys: list[str] | None = None,
-    max_workers: int = 200,
+    max_workers: int = 50,
 ) -> list[Trajectory]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
