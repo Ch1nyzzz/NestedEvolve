@@ -1,4 +1,4 @@
-# MetaEvolve 默认配置
+# Skill-based MetaEvolve 配置
 
 # LLM
 llm:
@@ -28,31 +28,22 @@ strategy:
   parent_best_bias: 0.7
   crossover_rate: 0.0
 
-# Surrogate 模型
-surrogate:
-  phi_dim: 16
-  numeric_state_dim: 8
-  semantic_state_dim: 17
-  n_tasks: 11  # 5 train + 6 test
-  task_embed_dim: 8
-  hidden: 64
-  buffer_size: 5000
-  train_epochs: 10
-  lr: 0.001
+# Skill Meta-Learning
+skill_meta:
+  n_meta_steps: 10
+  tasks_per_step: 3
+  n_segments: 3
+  steps_per_segment: 10
+  max_active_skills: 3
 
-# Meta-learning (ES-driven)
-meta:
-  n_meta_steps: 50
-  tasks_per_step: 5       # 全部训练任务，消除 task 采样噪声
-  max_concurrency: 500    # 全局 LLM 并发上限 (RPM≤3000)
-  adaptation_steps: 3     # held-out eval 时用
-  adaptation_lr: 0.01     # held-out eval 时用
-  meta_lr: 0.1            # ES 学习率
-  validation_steps: 5     # 保留兼容
-  warmup_steps: 5         # 前 N 步用更大随机范围探索
-  gradient_clip: 1.0
+# Skill Orchestrator
+orchestrator:
+  max_active_skills: 3
+  selection_interval_steps: 1
+  generation_interval_steps: 10
+  max_generate_per_window: 1
 
-# 任务划分（固定 seed 保证可复现）
+# 任务划分
 tasks:
   train:
     - circle_packing

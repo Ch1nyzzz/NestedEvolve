@@ -33,6 +33,25 @@ class TargetSystem(ABC):
     def default_config(self) -> dict:
         """返回框架默认配置。"""
 
+    async def run_segment(
+        self,
+        task,
+        n_steps: int,
+        skill_context: dict | None = None,
+        population=None,
+        initial_best_score: float | None = None,
+    ):
+        """分段运行，注入 skill 上下文。默认 fallback 到 run()。"""
+        from .trajectory import SegmentResult
+
+        score = self.run({}, task.name, n_steps)
+        init_score = (
+            task.baseline_score if initial_best_score is None else initial_best_score
+        )
+        return SegmentResult(
+            best_score=score, initial_score=init_score, skill_context_used=False
+        )
+
 
 # ============================================================
 # φ → 通用语义参数
@@ -98,8 +117,15 @@ class UniversalParams:
 class NativeAdapter(TargetSystem):
     """适配我们自己的 evolve_loop（同进程，直接调用）。"""
 
-    def __init__(self, llm_model: str = "together_ai/MiniMaxAI/MiniMax-M2.5"):
+    def __init__(
+        self,
+        llm_model: str = "together_ai/MiniMaxAI/MiniMax-M2.5",
+        params: StrategyParams | None = None,
+        llm=None,
+    ):
         self.llm_model = llm_model
+        self.params = params or StrategyParams()
+        self._llm = llm  # 可复用的 LLM client
 
     def default_config(self) -> dict:
         return StrategyParams().__dict__
@@ -124,6 +150,97 @@ class NativeAdapter(TargetSystem):
             run_inner_loop(task=task, params=params, n_steps=n_steps, llm=llm)
         )
         return result.final_best_score
+
+    async def run_segment(
+        self,
+        task,
+        n_steps: int,
+        skill_context: dict | None = None,
+        population=None,
+        initial_best_score: float | None = None,
+    ):
+        """分段运行 evolve_loop，注入 skill 上下文。"""
+        from .llm_client import LLMClient
+        from .evolve_loop import run_inner_loop
+        from .trajectory import SegmentResult, StepRecord
+
+        llm = self._llm or LLMClient(model=self.llm_model)
+        result = await run_inner_loop(
+            task=task,
+            params=self.params,
+            n_steps=n_steps,
+            llm=llm,
+            population=population,
+            skill_context=skill_context,
+        )
+        # 转换 step_records → StepRecord
+        records = []
+        initial_best = (
+            task.baseline_score if initial_best_score is None else initial_best_score
+        )
+        prev_best = initial_best
+        for rec in result.step_records:
+            cur_best = rec.get("best_so_far", 0.0)
+            records.append(
+                StepRecord(
+                    step=rec["step"],
+                    score=rec["score"],
+                    delta_score=cur_best - prev_best,
+                    error_summary=rec.get("error"),
+                )
+            )
+            prev_best = cur_best
+
+        # 提取 population snapshot
+        pop = result.final_population
+        pop_snapshot = None
+        island_stats = None
+        if pop and pop.size() > 0:
+            pop_snapshot = [
+                {
+                    "code": ind.code[:500],
+                    "score": ind.score,
+                    "island_id": ind.island_id,
+                    "id": ind.id,
+                }
+                for ind in pop.all_sorted()
+            ]
+            # 按岛统计
+            island_stats = {}
+            for isl in pop.active_islands():
+                members = pop.island_members(isl)
+                scores = [m.score for m in members]
+                island_stats[isl] = {
+                    "size": len(members),
+                    "best": max(scores),
+                    "mean": sum(scores) / len(scores),
+                }
+
+        # 提取错误详情（从原始 step_records 获取更多信息）
+        error_details = []
+        for raw in result.step_records:
+            if raw.get("error"):
+                error_details.append(
+                    {
+                        "step": raw["step"],
+                        "error_full": raw["error"],
+                        "island_id": raw.get("island_id"),
+                        "score": raw.get("score", 0.0),
+                    }
+                )
+
+        seg = SegmentResult(
+            best_score=result.final_best_score,
+            initial_score=initial_best,
+            trajectory=records,
+            skill_context_used=skill_context is not None,
+            population_snapshot=pop_snapshot,
+            error_details=error_details or None,
+            island_stats=island_stats,
+        )
+        # 附加 population 以便跨 segment 复用
+        seg.population = result.final_population
+        return seg
 
 
 class OpenEvolveAdapter(TargetSystem):

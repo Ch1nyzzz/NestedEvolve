@@ -16,6 +16,7 @@ def build_mutation_prompt(
     context_programs: list[Individual],
     params: StrategyParams,
     second_parent: Individual | None = None,
+    skill_context: dict | None = None,
 ) -> tuple[str, str]:
     """构建变异 prompt → (system_message, user_message)。"""
 
@@ -96,12 +97,19 @@ def build_mutation_prompt(
 3. 用 ```python ... ``` 包裹输出
 4. 保持函数签名不变，只修改实现"""
 
+    # === skill context 注入 ===
+    skill_section = ""
+    if skill_context:
+        from .skill_orchestrator import format_skill_context
+
+        skill_section = "\n" + format_skill_context(skill_context) + "\n"
+
     user_message = f"""## 当前程序 (score: {parent.score:.6f})
 
 ```python
 {parent.code}
 ```
-{context_section}{crossover_section}{analysis_section}
+{context_section}{crossover_section}{analysis_section}{skill_section}
 ## 变异指令
 
 请基于上述程序进行改进。变异强度: **{ms:.2f}** — {strength_desc}
@@ -131,16 +139,15 @@ def extract_code(
         if result is not None and _syntax_ok(result):
             return result
 
-    # fallback: 完整代码块
-    pattern = r"```python\s*\n(.*?)```"
-    matches = re.findall(pattern, response, re.DOTALL)
-    if matches:
-        return max(matches, key=len).strip()
-
-    pattern = r"```\s*\n(.*?)```"
-    matches = re.findall(pattern, response, re.DOTALL)
-    if matches:
-        return max(matches, key=len).strip()
+    # fallback: 完整代码块（过滤掉包含 SEARCH/REPLACE 标记的块）
+    for pat in [r"```python\s*\n(.*?)```", r"```\s*\n(.*?)```"]:
+        matches = re.findall(pat, response, re.DOTALL)
+        # 过滤掉 SEARCH/REPLACE 块被 ``` 包裹的情况
+        matches = [m for m in matches if "<<<< SEARCH" not in m and ">>>>" not in m]
+        if matches:
+            code = max(matches, key=len).strip()
+            if _syntax_ok(code):
+                return code
 
     # 再 fallback: SEARCH/REPLACE（不限 use_diff 标志）
     if parent_code is not None:
@@ -153,7 +160,7 @@ def extract_code(
 
 def _apply_search_replace(response: str, parent_code: str) -> Optional[str]:
     """解析并应用 SEARCH/REPLACE 块。"""
-    pattern = r"<<<<\s*SEARCH\s*\n(.*?)\n====\s*REPLACE\s*\n(.*?)\n>>>>"
+    pattern = r"<<<<\s*SEARCH\s*\n(.*?)\n=+\s*(?:REPLACE)?\s*\n(.*?)\n>>>>"
     matches = re.findall(pattern, response, re.DOTALL)
     if not matches:
         return None

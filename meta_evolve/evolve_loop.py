@@ -21,7 +21,7 @@ from .strategy import StrategyParams
 from .task_adapter import Task, assemble_program
 
 SEMANTIC_STATE_DIM = 17
-_MAX_IN_FLIGHT = 20
+_MAX_IN_FLIGHT = 5
 
 # 代码去重：(task_name, code_hash) → score
 _eval_cache: dict[tuple[str, int], float] = {}
@@ -39,6 +39,7 @@ class EvolveResult:
     transitions: list[tuple[np.ndarray, np.ndarray, int, float]] = field(
         default_factory=list
     )
+    step_records: list[dict] = field(default_factory=list)
 
 
 def _individual_fitness_label(score: float, pre_mean: float, success: bool) -> float:
@@ -77,8 +78,14 @@ async def _mutation_worker(
     params: StrategyParams,
     island_id: int,
     global_sem: asyncio.Semaphore | None = None,
+    rng: np.random.RandomState | None = None,
+    skill_context: dict | None = None,
 ) -> _WorkerResult:
-    """单个变异 worker。发射时快照 population 状态。"""
+    """单个变异 worker。发射时快照 population 状态。
+
+    rng: 可选的固定随机数生成器，用于 common random numbers。
+    """
+    _rng = rng if rng is not None else np.random
 
     # --- 发射时快照 ---
     pre_best = population.best().score if population.best() else 0.0
@@ -86,7 +93,7 @@ async def _mutation_worker(
     pre_state = extract_numeric_state(population)
 
     parent = population.select_parent(
-        params.selection_temperature, params.exploration_rate, island_id
+        params.selection_temperature, params.exploration_rate, island_id, _rng
     )
     context = population.select_context(
         params.context_size, params.diversity_weight, island_id
@@ -94,15 +101,15 @@ async def _mutation_worker(
 
     # crossover
     second_parent = None
-    if np.random.random() < params.crossover_rate and population.size() >= 2:
+    if _rng.random() < params.crossover_rate and population.size() >= 2:
         second_parent = population.select_parent(
-            params.selection_temperature, 1.0 - params.parent_best_bias, island_id
+            params.selection_temperature, 1.0 - params.parent_best_bias, island_id, _rng
         )
         if second_parent.id == parent.id:
             second_parent = None
 
     sys_msg, user_msg = build_mutation_prompt(
-        task, parent, context, params, second_parent
+        task, parent, context, params, second_parent, skill_context=skill_context
     )
     use_diff = params.diff_vs_rewrite < 0.5
     temperature = params.llm_temperature
@@ -182,6 +189,8 @@ async def run_inner_loop(
     analyze_interval: int = 5,
     max_in_flight: int = _MAX_IN_FLIGHT,
     global_sem: asyncio.Semaphore | None = None,
+    rng_seed: int | None = None,
+    skill_context: dict | None = None,
 ) -> EvolveResult:
     """Streaming pipeline 进化循环。
 
@@ -222,6 +231,7 @@ async def run_inner_loop(
     score_trajectory = []
     state_trajectory = []
     transitions = []
+    step_records = []
 
     # --- streaming: 发满 → 完成一个补一个 ---
     next_worker_id = 0  # 下一个要发射的 worker 编号
@@ -229,13 +239,28 @@ async def run_inner_loop(
     in_flight: set[asyncio.Task] = set()
     semantic_counter = 0
 
+    # common random numbers: 每个 worker 用确定性 rng（如果指定了 seed）
+    base_seed = rng_seed
+
     def _launch_one() -> asyncio.Task | None:
         nonlocal next_worker_id
         if next_worker_id >= n_steps:
             return None
         island_id = next_worker_id % num_islands
+        worker_rng = None
+        if base_seed is not None:
+            worker_rng = np.random.RandomState(base_seed + next_worker_id)
         t = asyncio.create_task(
-            _mutation_worker(llm, task, population, params, island_id, global_sem)
+            _mutation_worker(
+                llm,
+                task,
+                population,
+                params,
+                island_id,
+                global_sem,
+                worker_rng,
+                skill_context=skill_context,
+            )
         )
         next_worker_id += 1
         return t
@@ -315,6 +340,18 @@ async def run_inner_loop(
             new_best = population.best().score if population.best() else 0.0
             score_trajectory.append(new_best)
 
+            # 记录 step record
+            step_records.append(
+                {
+                    "step": completed,
+                    "score": r.score,
+                    "best_so_far": new_best,
+                    "error": r.error,
+                    "island_id": r.island_id,
+                    "success": success,
+                }
+            )
+
             # 立刻补一个新 worker（看到最新 population）
             new_task = _launch_one()
             if new_task:
@@ -331,4 +368,5 @@ async def run_inner_loop(
         score_trajectory=score_trajectory,
         state_trajectory=state_trajectory,
         transitions=transitions,
+        step_records=step_records,
     )

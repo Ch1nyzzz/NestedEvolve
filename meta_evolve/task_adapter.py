@@ -54,6 +54,7 @@ class Task:
     system_prompt: str
     baseline_score: float
     eval_timeout: int
+    evaluator_source: str = ""  # 评估器源码，供 skill 生成器理解评分逻辑
 
 
 def _find_evaluator(bench_dir: Path) -> Path:
@@ -206,6 +207,7 @@ def load_task(benchmark_name: str, task_id: int) -> Task:
     # 加载 evaluator
     evaluator_path = _find_evaluator(bench_dir)
     evaluate_fn = _load_evaluator_fn(evaluator_path, eval_timeout)
+    evaluator_source = evaluator_path.read_text()
 
     # baseline: 优先读缓存，miss 时 eval 后原子合并写入
     cache = _load_baseline_cache()
@@ -244,6 +246,7 @@ def load_task(benchmark_name: str, task_id: int) -> Task:
         system_prompt=system_prompt,
         baseline_score=baseline_score,
         eval_timeout=eval_timeout,
+        evaluator_source=evaluator_source,
     )
 
 

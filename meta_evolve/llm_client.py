@@ -47,7 +47,15 @@ class LLMClient:
                     temperature=temperature,
                     max_tokens=tokens,
                 )
-                return response.choices[0].message.content
+                content = response.choices[0].message.content
+                if not content:
+                    msg = response.choices[0].message
+                    reason = response.choices[0].finish_reason
+                    print(
+                        f"    [llm-debug] empty content! finish_reason={reason} "
+                        f"message_keys={list(vars(msg).keys()) if hasattr(msg, '__dict__') else msg}"
+                    )
+                return content or ""
             except Exception as e:
                 last_err = e
                 if attempt < max_retries - 1:

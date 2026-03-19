@@ -47,8 +47,13 @@ class Population:
         return {ind.island_id for ind in self.individuals.values()}
 
     def select_parent(
-        self, temperature: float, exploration_rate: float, island_id: int | None = None
+        self,
+        temperature: float,
+        exploration_rate: float,
+        island_id: int | None = None,
+        rng=None,
     ) -> Individual:
+        _rng = rng if rng is not None else np.random
         if island_id is not None:
             inds = self.island_members(island_id)
             if not inds:
@@ -58,15 +63,15 @@ class Population:
         if len(inds) == 1:
             return inds[0]
 
-        if np.random.random() < exploration_rate:
-            return inds[np.random.randint(len(inds))]
+        if _rng.random() < exploration_rate:
+            return inds[_rng.randint(len(inds))]
 
         scores = np.array([ind.score for ind in inds])
         logits = scores / max(temperature, 1e-6)
         logits -= logits.max()
         probs = np.exp(logits)
         probs /= probs.sum()
-        idx = np.random.choice(len(inds), p=probs)
+        idx = _rng.choice(len(inds), p=probs)
         return inds[idx]
 
     def select_context(
