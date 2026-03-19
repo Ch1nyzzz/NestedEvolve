@@ -23,6 +23,15 @@ class LLMClient:
         self.model = model
         self.max_tokens = max_tokens
 
+    @classmethod
+    def from_config(cls, config: dict) -> LLMClient:
+        """从 config['llm'] 构造客户端。"""
+        llm_cfg = config.get("llm", {})
+        return cls(
+            model=llm_cfg.get("model", "together_ai/MiniMaxAI/MiniMax-M2.5"),
+            max_tokens=llm_cfg.get("max_tokens", 4096),
+        )
+
     async def generate(
         self,
         system_msg: str,

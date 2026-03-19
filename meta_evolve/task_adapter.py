@@ -180,9 +180,14 @@ def _load_baseline_cache() -> dict:
 def _save_baseline_cache(cache: dict):
     """写入 baseline 缓存（线程安全，原子写）。"""
     with _CACHE_LOCK:
-        tmp = _BASELINE_CACHE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cache, indent=2))
-        tmp.replace(_BASELINE_CACHE_PATH)
+        _write_baseline_cache(cache)
+
+
+def _write_baseline_cache(cache: dict):
+    """原子写 baseline 缓存。调用方负责加锁。"""
+    tmp = _BASELINE_CACHE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cache, indent=2))
+    tmp.replace(_BASELINE_CACHE_PATH)
 
 
 def load_task(benchmark_name: str, task_id: int) -> Task:
@@ -233,9 +238,7 @@ def load_task(benchmark_name: str, task_id: int) -> Task:
                 except json.JSONDecodeError:
                     pass
             fresh[benchmark_name] = baseline_score
-            tmp_f = _BASELINE_CACHE_PATH.with_suffix(".tmp")
-            tmp_f.write_text(json.dumps(fresh, indent=2))
-            tmp_f.replace(_BASELINE_CACHE_PATH)
+            _write_baseline_cache(fresh)
 
     return Task(
         name=benchmark_name,

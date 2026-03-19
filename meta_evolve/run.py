@@ -32,18 +32,12 @@ async def run_single_task(args, config):
     task = load_task(task_name, task_id)
     print(f"  baseline_score = {task.baseline_score:.6f}")
 
-    llm = LLMClient(
-        model=config["llm"]["model"],
-        max_tokens=config["llm"]["max_tokens"],
-    )
+    llm = LLMClient.from_config(config)
 
     if args.fixed_phi:
         params = StrategyParams()  # 默认值
     else:
-        strategy_cfg = config.get("strategy", {})
-        params = StrategyParams(
-            **{k: v for k, v in strategy_cfg.items() if k != "PHI_DIM"}
-        )
+        params = StrategyParams.from_config(config)
 
     # Step 2: 可选启用语义分析
     semantic_analyzer = None
@@ -106,13 +100,9 @@ async def run_skill_evolve(args, config):
     task = load_task(task_name, task_id)
     print(f"  baseline_score = {task.baseline_score:.6f}")
 
-    llm = LLMClient(
-        model=config["llm"]["model"],
-        max_tokens=config["llm"]["max_tokens"],
-    )
+    llm = LLMClient.from_config(config)
 
-    strategy_cfg = config.get("strategy", {})
-    params = StrategyParams(**{k: v for k, v in strategy_cfg.items() if k != "PHI_DIM"})
+    params = StrategyParams.from_config(config)
 
     # 动态 skill library（从空开始，运行中生成）
     library_path = Path(__file__).parent / f"skill_library_{task_name}.json"
@@ -173,10 +163,7 @@ async def run_skill_meta(args, config):
     from .meta_learner import SkillMetaLearner
     from .task_adapter import load_task_parallel
 
-    llm = LLMClient(
-        model=config["llm"]["model"],
-        max_tokens=config["llm"]["max_tokens"],
-    )
+    llm = LLMClient.from_config(config)
 
     all_names = config["tasks"]["train"] + config["tasks"]["test"]
     train_names = set(config["tasks"]["train"])
@@ -224,10 +211,7 @@ async def run_meta_learn(args, config):
     from .surrogate import SurrogateModel
     from .task_adapter import load_task_parallel
 
-    llm = LLMClient(
-        model=config["llm"]["model"],
-        max_tokens=config["llm"]["max_tokens"],
-    )
+    llm = LLMClient.from_config(config)
 
     all_names = config["tasks"]["train"] + config["tasks"]["test"]
     train_names = set(config["tasks"]["train"])
