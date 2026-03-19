@@ -37,6 +37,18 @@ class StrategyParams:
 
     PHI_DIM: int = 16
 
+    @classmethod
+    def from_config(cls, config: dict | None = None) -> StrategyParams:
+        """从 config['strategy'] 构造参数，忽略 dataclass 外字段。"""
+        strategy_cfg = (config or {}).get("strategy", {})
+        return cls(
+            **{
+                key: value
+                for key, value in strategy_cfg.items()
+                if key in cls.__dataclass_fields__ and key != "PHI_DIM"
+            }
+        )
+
     def to_vector(self) -> np.ndarray:
         """→ 16 维连续向量。"""
 

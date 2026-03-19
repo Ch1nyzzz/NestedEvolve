@@ -418,10 +418,7 @@ class SkillMetaLearner:
         }
 
         # Adapter
-        strategy_cfg = config.get("strategy", {})
-        params = StrategyParams(
-            **{k: v for k, v in strategy_cfg.items() if k != "PHI_DIM"}
-        )
+        params = StrategyParams.from_config(config)
         self.adapter = NativeAdapter(
             llm_model=config["llm"]["model"],
             params=params,

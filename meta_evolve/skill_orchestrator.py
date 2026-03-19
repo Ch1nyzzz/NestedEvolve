@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from .skill import GeneratedSkill, SkillAxis, SkillLevel, SkillPolarity
+from .skill import GeneratedSkill, SkillAxis, SkillLevel
 from .skill_generator import SkillGenerator
 from .skill_library import SkillLibrary
 from .system_description import build_system_description
