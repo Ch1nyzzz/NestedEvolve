@@ -1057,6 +1057,13 @@ L2 生成了 1 个候选 patch (`fix_analyzer_optimizer_prompts_and_history`)，
   - `noa/planner/reducer.py` — observe/analyze 分支从 payload 读取 `pool_size`；evaluate_patch 分支将 active_pattern 名称+结果追加到 `attempted_patterns`
   - `noa/planner/executors.py` — `_do_observe` payload 新增 `pool_size` 字段
 
+### Meta Evolve Skill 系统四项修复 (2026-03-19)
+- **修复 1:** `_build_observation()` 的 `population_summary` 改为从真实 population 对象（`population.scores()`）计算，含 percentiles/min/max；population 不可用时 fallback 到 trajectory，且去掉了 `score > 0` 过滤
+- **修复 2:** `_compute_step_dynamics()` 的 `running_best` 初始值从 `0.0` 改为 `all_scores[0]`，避免负分任务指标失真
+- **修复 3:** `SkillEvidence` 新增 `stagnation_levels`、`error_rates`、`co_active_counts` 字段，`record()` 和 `record_activation()` 同步传递上下文，save/load 也已更新
+- **修复 4:** `SkillDistiller` 的 `DISTILL_SYSTEM` 提示词 axis 列表从旧的 5 轴（prompt调整/搜索控制/上下文丰富）更新为当前 3 轴（reflection/diagnosis/strategy）
+- **修改文件:** `meta_evolve/skill_orchestrator.py`、`meta_evolve/skill.py`、`meta_evolve/skill_library.py`、`meta_evolve/skill_distiller.py`
+
 ### ❌ 未完成 / 待解决
 1. ~~**检索器替换（高优先级）**~~ → ✅ 已完成 WikiSemanticRetriever
 2. **Baseline 评估** — 需要用 WikiSemanticRetriever 跑完整 baseline（100 条），确定真实 F1 基线

@@ -38,6 +38,9 @@ class SkillEvidence:
     improvements: list[float] = field(default_factory=list)
     matched_tasks: list[str] = field(default_factory=list)
     matched_phases: list[str] = field(default_factory=list)
+    stagnation_levels: list[int] = field(default_factory=list)
+    error_rates: list[float] = field(default_factory=list)
+    co_active_counts: list[int] = field(default_factory=list)
 
     @property
     def avg_improvement(self) -> float:
@@ -62,6 +65,9 @@ class SkillEvidence:
         improvement: float,
         task_name: str | None = None,
         phase: str | None = None,
+        stagnation: int = 0,
+        error_rate: float = 0.0,
+        co_active_count: int = 1,
     ):
         self.activations += 1
         self.improvements.append(improvement)
@@ -73,8 +79,19 @@ class SkillEvidence:
             self.matched_phases.append(phase)
             if len(self.matched_phases) > 30:
                 self.matched_phases = self.matched_phases[-30:]
-        if len(self.improvements) > 20:
-            self.improvements = self.improvements[-20:]
+        self.stagnation_levels.append(stagnation)
+        self.error_rates.append(error_rate)
+        self.co_active_counts.append(co_active_count)
+        # 保持历史窗口一致
+        cap = 20
+        if len(self.improvements) > cap:
+            self.improvements = self.improvements[-cap:]
+        if len(self.stagnation_levels) > cap:
+            self.stagnation_levels = self.stagnation_levels[-cap:]
+        if len(self.error_rates) > cap:
+            self.error_rates = self.error_rates[-cap:]
+        if len(self.co_active_counts) > cap:
+            self.co_active_counts = self.co_active_counts[-cap:]
 
 
 @dataclass

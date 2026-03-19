@@ -97,6 +97,9 @@ class SkillLibrary:
         improvement: float,
         task_name: str | None = None,
         phase: str | None = None,
+        stagnation: int = 0,
+        error_rate: float = 0.0,
+        co_active_count: int = 1,
     ):
         """记录一次激活结果。"""
         if skill_id in self.skills:
@@ -104,6 +107,9 @@ class SkillLibrary:
                 improvement,
                 task_name=task_name,
                 phase=phase,
+                stagnation=stagnation,
+                error_rate=error_rate,
+                co_active_count=co_active_count,
             )
 
     def get_skill_history(
@@ -221,6 +227,9 @@ class SkillLibrary:
                     "improvements": skill.evidence.improvements,
                     "matched_tasks": skill.evidence.matched_tasks,
                     "matched_phases": skill.evidence.matched_phases,
+                    "stagnation_levels": skill.evidence.stagnation_levels,
+                    "error_rates": skill.evidence.error_rates,
+                    "co_active_counts": skill.evidence.co_active_counts,
                 },
             }
         self._persist_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -232,11 +241,15 @@ class SkillLibrary:
         except (json.JSONDecodeError, OSError):
             return
         for sid, d in data.items():
+            ev = d.get("evidence", {})
             evidence = SkillEvidence(
-                activations=d.get("evidence", {}).get("activations", 0),
-                improvements=d.get("evidence", {}).get("improvements", []),
-                matched_tasks=d.get("evidence", {}).get("matched_tasks", []),
-                matched_phases=d.get("evidence", {}).get("matched_phases", []),
+                activations=ev.get("activations", 0),
+                improvements=ev.get("improvements", []),
+                matched_tasks=ev.get("matched_tasks", []),
+                matched_phases=ev.get("matched_phases", []),
+                stagnation_levels=ev.get("stagnation_levels", []),
+                error_rates=ev.get("error_rates", []),
+                co_active_counts=ev.get("co_active_counts", []),
             )
             skill = GeneratedSkill(
                 skill_id=sid,
