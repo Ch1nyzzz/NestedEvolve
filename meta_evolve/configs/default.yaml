@@ -1,0 +1,69 @@
+# MetaEvolve 默认配置
+
+# LLM
+llm:
+  model: "together_ai/MiniMaxAI/MiniMax-M2.5"
+  max_tokens: 4096
+
+# 内层进化循环
+inner_loop:
+  n_steps: 20
+  max_pop_size: 30
+  analyze_interval: 5
+
+# 策略默认初始值
+strategy:
+  exploration_rate: 0.3
+  selection_temperature: 1.0
+  elite_ratio: 0.2
+  mutation_strength: 0.5
+  context_size: 3
+  diversity_weight: 0.3
+  error_analysis: 0.5
+  diff_vs_rewrite: 0.3
+  show_context_scores: 0.7
+  domain_hint: 0.5
+  llm_temperature: 0.7
+  max_tokens_ratio: 0.5
+  parent_best_bias: 0.7
+  crossover_rate: 0.0
+
+# Surrogate 模型
+surrogate:
+  phi_dim: 16
+  numeric_state_dim: 8
+  semantic_state_dim: 17
+  n_tasks: 11  # 5 train + 6 test
+  task_embed_dim: 8
+  hidden: 64
+  buffer_size: 5000
+  train_epochs: 10
+  lr: 0.001
+
+# Meta-learning (ES-driven)
+meta:
+  n_meta_steps: 20
+  tasks_per_step: 5       # 全部训练任务，消除 task 采样噪声
+  max_concurrency: 500    # 全局 LLM 并发上限 (RPM≤3000)
+  adaptation_steps: 3     # held-out eval 时用
+  adaptation_lr: 0.01     # held-out eval 时用
+  meta_lr: 0.05           # ES 学习率（比 MAML 大，因为 ES 梯度方差更大）
+  validation_steps: 5     # 保留兼容
+  warmup_steps: 5         # 前 N 步用更大随机范围探索
+  gradient_clip: 1.0
+
+# 任务划分（固定 seed 保证可复现）
+tasks:
+  train:
+    - circle_packing
+    - first_autocorr_ineq
+    - heilbronn_triangle
+    - second_autocorr_ineq
+    - third_autocorr_ineq
+  test:
+    - circle_packing_rect
+    - erdos_min_overlap
+    - matmul
+    - signal_processing
+    - sums_diffs_finite_sets
+    - uncertainty_ineq
