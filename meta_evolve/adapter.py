@@ -187,6 +187,14 @@ class NativeAdapter(TargetSystem):
                     score=rec["score"],
                     delta_score=cur_best - prev_best,
                     error_summary=rec.get("error"),
+                    code_snippet=rec.get("code_snippet"),
+                    parent_id=rec.get("parent_id"),
+                    parent_score=rec.get("parent_score"),
+                    parent_best=rec.get("parent_best"),
+                    outcome_type=rec.get("outcome_type"),
+                    admitted_to_population=rec.get("admitted", False),
+                    diff_summary=rec.get("diff_summary"),
+                    diagnostic_tags=[rec.get("outcome_type")] if rec.get("outcome_type") else [],
                 )
             )
             prev_best = cur_best
