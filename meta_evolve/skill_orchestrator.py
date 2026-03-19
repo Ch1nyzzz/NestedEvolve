@@ -166,12 +166,16 @@ class SkillOrchestrator:
 
                 improvement = window_result.best_score - prev_best
                 phase = obs["diagnostic_packet"].get("phase", "early")
+                co_active = len(active_skills) + len(active_anti_skills)
                 for skill in active_skills + active_anti_skills:
                     self.library.record_activation(
                         skill.skill_id,
                         improvement,
                         task_name=task.name,
                         phase=phase,
+                        stagnation=stagnation,
+                        error_rate=obs.get("error_rate", 0.0),
+                        co_active_count=co_active,
                     )
 
                 for rec in window_result.trajectory:
@@ -677,8 +681,20 @@ def _build_observation(
     )
 
     pop_summary = {"size": 0, "mean_score": 0.0, "score_variance": 0.0}
-    if trajectory.segments:
-        last_scores = [r.score for r in trajectory.segments[-1].trajectory if r.score > 0]
+    if population and hasattr(population, "scores"):
+        pop_scores = population.scores()
+        if len(pop_scores) > 0:
+            pop_summary = {
+                "size": len(pop_scores),
+                "mean_score": float(np.mean(pop_scores)),
+                "score_variance": float(np.var(pop_scores)),
+                "percentile_25": float(np.percentile(pop_scores, 25)),
+                "percentile_75": float(np.percentile(pop_scores, 75)),
+                "min_score": float(np.min(pop_scores)),
+                "max_score": float(np.max(pop_scores)),
+            }
+    elif trajectory.segments:
+        last_scores = [r.score for r in trajectory.segments[-1].trajectory]
         if last_scores:
             pop_summary = {
                 "size": len(last_scores),
@@ -834,7 +850,7 @@ def _compute_step_dynamics(trajectory: RunTrajectory, current_best: float) -> di
         }
 
     best_so_far: list[float] = []
-    running_best = 0.0
+    running_best = all_scores[0]
     for s in all_scores:
         running_best = max(running_best, s)
         best_so_far.append(running_best)

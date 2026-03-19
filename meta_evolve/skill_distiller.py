@@ -27,7 +27,7 @@ class DistillResult:
 
 
 DISTILL_SYSTEM = """你是一个 meta-learning 分析器。分析多个任务上的进化轨迹和 skill 使用记录，总结：
-1. 每个 axis（反思/诊断/prompt调整/搜索控制/上下文丰富）在什么类型任务上最有效
+1. 每个 axis（reflection/diagnosis/strategy）在什么类型任务上最有效
 2. 哪些 axis 组合有协同效果
 3. 哪些 skill 实例特别成功，它们的共性是什么
 
@@ -35,7 +35,8 @@ DISTILL_SYSTEM = """你是一个 meta-learning 分析器。分析多个任务上
 {
   "axis_effectiveness": {
     "reflection": {"effective_on": ["停滞严重的任务"], "avg_improvement": 0.05},
-    "diagnosis": {"effective_on": ["高错误率任务"], "avg_improvement": 0.03}
+    "diagnosis": {"effective_on": ["高错误率任务"], "avg_improvement": 0.03},
+    "strategy": {"effective_on": ["需要搜索策略调整的任务"], "avg_improvement": 0.04}
   },
   "observations": "分析总结",
   "recommendations": ["建议1", "建议2"]
