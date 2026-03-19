@@ -15,8 +15,16 @@ class StepRecord:
     score: float
     delta_score: float
     activated_skills: list[str] = field(default_factory=list)
+    active_anti_skills: list[str] = field(default_factory=list)
     error_summary: str | None = None
     code_snippet: str | None = None  # 代码前 200 字符摘要
+    parent_id: str | None = None
+    parent_score: float | None = None
+    parent_best: float | None = None
+    outcome_type: str | None = None
+    admitted_to_population: bool = False
+    diff_summary: str | None = None
+    diagnostic_tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -26,7 +34,9 @@ class SelectionEvent:
     start_step: int
     n_steps: int
     activated_skills: list[str] = field(default_factory=list)
+    active_anti_skills: list[str] = field(default_factory=list)
     generated_skills: list[str] = field(default_factory=list)
+    generated_anti_skills: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -38,6 +48,7 @@ class SegmentResult:
     trajectory: list[StepRecord] = field(default_factory=list)
     skill_context_used: bool = False
     activated_skills: list[str] = field(default_factory=list)
+    active_anti_skills: list[str] = field(default_factory=list)
     selection_events: list[SelectionEvent] = field(default_factory=list)
     # 丰富数据（供 skill 生成器使用）
     population_snapshot: list[dict] | None = (
@@ -45,6 +56,7 @@ class SegmentResult:
     )
     error_details: list[dict] | None = None  # [{step, error_full, code_snippet}, ...]
     island_stats: dict | None = None  # {island_id: {size, best, mean}}
+    diagnostic_packet: dict | None = None
 
     @property
     def improvement(self) -> float:
@@ -60,22 +72,28 @@ class RunTrajectory:
     segments: list[SegmentResult] = field(default_factory=list)
     total_improvement: float = 0.0
     skills_used: list[str] = field(default_factory=list)
+    anti_skills_used: list[str] = field(default_factory=list)
 
     def to_summary(self) -> str:
         """压缩为 LLM 可读摘要。"""
         lines = [f"Task: {self.task_name}"]
         lines.append(f"Total improvement: {self.total_improvement:.6f}")
         lines.append(f"Skills used: {', '.join(self.skills_used) or 'none'}")
+        lines.append(
+            f"Anti-skills used: {', '.join(self.anti_skills_used) or 'none'}"
+        )
         for i, seg in enumerate(self.segments):
             skills_str = ", ".join(seg.activated_skills) or "none"
+            anti_str = ", ".join(seg.active_anti_skills) or "none"
             lines.append(
                 f"  Segment {i}: {seg.initial_score:.4f} → {seg.best_score:.4f} "
-                f"(Δ={seg.improvement:.4f}, skills=[{skills_str}])"
+                f"(Δ={seg.improvement:.4f}, skills=[{skills_str}], anti=[{anti_str}])"
             )
             if seg.selection_events:
                 events_str = "; ".join(
                     f"step {event.start_step}+{event.n_steps-1}: "
-                    f"{', '.join(event.activated_skills) or 'none'}"
+                    f"skills={','.join(event.activated_skills) or 'none'} "
+                    f"anti={','.join(event.active_anti_skills) or 'none'}"
                     for event in seg.selection_events[-3:]
                 )
                 lines.append(f"    selections: {events_str}")
@@ -87,6 +105,12 @@ class RunTrajectory:
                         if rec.activated_skills
                         else " skills=[none]"
                     )
+                    + (
+                        f" anti=[{', '.join(rec.active_anti_skills)}]"
+                        if rec.active_anti_skills
+                        else " anti=[none]"
+                    )
+                    + (f" outcome={rec.outcome_type}" if rec.outcome_type else "")
                     + (f" err={rec.error_summary}" if rec.error_summary else "")
                 )
         return "\n".join(lines)

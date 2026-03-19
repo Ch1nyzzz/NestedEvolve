@@ -56,12 +56,13 @@ class SkillDistiller:
         """分析多条轨迹，生成蒸馏结果。"""
         evidence = library.get_evidence_summary()
         summaries = [traj.to_summary() for traj in trajectories]
+        joined_summaries = "---\n".join(summaries)
 
         user_msg = f"""## Skill Evidence（按 axis 分组）
 {json.dumps(evidence, indent=2, ensure_ascii=False)}
 
 ## 本轮轨迹
-{"---\n".join(summaries)}
+{joined_summaries}
 
 请分析各 axis 的效果并给出建议。"""
 

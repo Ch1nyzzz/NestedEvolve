@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -57,6 +58,50 @@ def _syntax_check(code: str) -> str | None:
         return f"syntax: {e.msg} line {e.lineno}"
 
 
+def _summarize_diff(parent_code: str, child_code: str | None, max_lines: int = 8) -> str | None:
+    if not child_code:
+        return None
+    diff = list(
+        difflib.unified_diff(
+            parent_code.splitlines(),
+            child_code.splitlines(),
+            lineterm="",
+            n=1,
+        )
+    )
+    if not diff:
+        return None
+    return "\n".join(diff[:max_lines])
+
+
+def _classify_outcome(
+    score: float,
+    parent_score: float,
+    pre_best: float,
+    success: bool,
+    error: str | None,
+    code_changed: bool,
+) -> str:
+    if error is not None:
+        err = error.lower()
+        if "syntax" in err:
+            return "syntax_error"
+        if "timeout" in err:
+            return "timeout"
+        return "runtime_error"
+    if not success:
+        return "invalid"
+    if not code_changed:
+        return "no_change"
+    if score > pre_best + 1e-9:
+        return "global_improvement"
+    if score > parent_score + 1e-9:
+        return "local_improvement"
+    if score < parent_score - 1e-9:
+        return "regression"
+    return "no_effect"
+
+
 @dataclass
 class _WorkerResult:
     """单个 worker 的结果 + 发射时的快照。"""
@@ -65,6 +110,9 @@ class _WorkerResult:
     score: float
     error: str | None
     island_id: int
+    parent_id: str
+    parent_score: float
+    parent_code: str
     # 发射时记录的 pre-update 快照
     pre_best: float
     pre_mean: float
@@ -121,6 +169,9 @@ async def _mutation_worker(
             score=score,
             error=error,
             island_id=island_id,
+            parent_id=parent.id,
+            parent_score=parent.score,
+            parent_code=parent.code,
             pre_best=pre_best,
             pre_mean=pre_mean,
             pre_state=pre_state,
@@ -303,6 +354,8 @@ async def run_inner_loop(
                 and np.isfinite(r.score)
                 and r.score > 0
             )
+            code_changed = bool(r.code is not None and r.code != r.parent_code)
+            admitted = False
             if success:
                 gen = (
                     max(
@@ -321,6 +374,7 @@ async def run_inner_loop(
                 population.add(new_ind)
                 population.prune(max_pop_size, params.elite_ratio, num_islands)
                 cur_best = population.best().score
+                admitted = any(ind.id == new_ind.id for ind in population.individuals.values())
                 print(
                     f"  [{completed}/{n_steps}] score={r.score:.6f} (best={cur_best:.6f}) [island {r.island_id}]"
                 )
@@ -330,6 +384,15 @@ async def run_inner_loop(
             # 迁移
             if num_islands > 1 and completed % migration_interval == 0:
                 population.migrate(params.migration_rate, num_islands)
+
+            outcome_type = _classify_outcome(
+                r.score,
+                r.parent_score,
+                r.pre_best,
+                success,
+                r.error,
+                code_changed,
+            )
 
             # transition label 基于 pre-update stats
             fitness_label = _individual_fitness_label(r.score, r.pre_mean, success)
@@ -349,6 +412,14 @@ async def run_inner_loop(
                     "error": r.error,
                     "island_id": r.island_id,
                     "success": success,
+                    "parent_id": r.parent_id,
+                    "parent_score": r.parent_score,
+                    "parent_best": r.pre_best,
+                    "admitted": admitted,
+                    "outcome_type": outcome_type,
+                    "code_snippet": (r.code or r.parent_code)[:200],
+                    "diff_summary": _summarize_diff(r.parent_code, r.code),
+                    "code_changed": code_changed,
                 }
             )
 

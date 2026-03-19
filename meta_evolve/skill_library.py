@@ -1,26 +1,25 @@
-"""Skill Library：动态生成的 skill 的存储、检索、evidence 管理。
-
-不再从文件系统加载预定义 skill，而是在运行时由 SkillGenerator 生成并注册。
-支持跨任务复用：在 task A 上生成的 skill 可以在 task B 上被检索到。
-"""
+"""Skill Library：动态生成的 skill / anti-skill 的存储、检索、evidence 管理。"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from .skill import GeneratedSkill, SkillAxis, SkillEvidence
+from .skill import (
+    GeneratedSkill,
+    SkillAxis,
+    SkillEvidence,
+    SkillLevel,
+    SkillPolarity,
+)
 
 
 class SkillLibrary:
     """动态 Skill 的注册表。"""
 
     def __init__(self, persist_path: Path | None = None):
-        # axis → list of skills（按 axis 组织，每个 axis 可以有多个 skill 实例）
         self.skills: dict[str, GeneratedSkill] = {}
         self._persist_path = persist_path
-
-        # 加载持久化数据
         if persist_path and persist_path.exists():
             self._load(persist_path)
 
@@ -32,44 +31,80 @@ class SkillLibrary:
         self,
         axis: SkillAxis | None = None,
         task_name: str | None = None,
+        task_tags: list[str] | None = None,
+        phase: str | None = None,
+        diagnostics: list[str] | None = None,
+        level: SkillLevel | None = None,
+        polarity: SkillPolarity | None = SkillPolarity.POSITIVE,
         top_k: int = 3,
     ) -> list[GeneratedSkill]:
-        """检索最相关的 skills。
-
-        优先级：
-        1. 同 axis + 同 task 上效果好的
-        2. 同 axis + 其他 task 上效果好的（跨任务迁移）
-        3. 最新生成的（缺少 evidence 时的 fallback）
-        """
+        """检索最相关的 skills。"""
         candidates = list(self.skills.values())
-
         if axis is not None:
             candidates = [s for s in candidates if s.axis == axis]
+        if level is not None:
+            candidates = [s for s in candidates if s.level == level]
+        if polarity is not None:
+            candidates = [s for s in candidates if s.polarity == polarity]
 
-        # 排序：同 task + 高 avg_improvement 优先
         def _score(s: GeneratedSkill) -> float:
-            task_bonus = 0.1 if (task_name and s.task_origin == task_name) else 0.0
-            return s.evidence.avg_improvement * s.evidence.confidence + task_bonus
+            task_bonus = 0.15 if (task_name and s.task_origin == task_name) else 0.0
+            context_match = s.matches_context(task_tags, phase, diagnostics)
+            evidence = s.evidence.avg_improvement * max(s.evidence.confidence, 0.2)
+            freshness = 0.01 * s.generation
+            return evidence + task_bonus + context_match + freshness
 
         candidates.sort(key=_score, reverse=True)
         return candidates[:top_k]
 
-    def retrieve_by_axes(
+    def retrieve_for_context(
         self,
-        axes: list[SkillAxis],
-        task_name: str | None = None,
-        per_axis: int = 1,
+        task_name: str,
+        task_tags: list[str],
+        phase: str,
+        diagnostics: list[str],
+        top_k: int = 6,
     ) -> list[GeneratedSkill]:
-        """每个 axis 检索 top-N 个 skill。"""
-        result = []
-        for axis in axes:
-            result.extend(self.retrieve(axis=axis, task_name=task_name, top_k=per_axis))
-        return result
+        return self.retrieve(
+            task_name=task_name,
+            task_tags=task_tags,
+            phase=phase,
+            diagnostics=diagnostics,
+            polarity=SkillPolarity.POSITIVE,
+            top_k=top_k,
+        )
 
-    def record_activation(self, skill_id: str, improvement: float):
+    def retrieve_anti_skills(
+        self,
+        task_name: str,
+        task_tags: list[str],
+        phase: str,
+        diagnostics: list[str],
+        top_k: int = 2,
+    ) -> list[GeneratedSkill]:
+        return self.retrieve(
+            task_name=task_name,
+            task_tags=task_tags,
+            phase=phase,
+            diagnostics=diagnostics,
+            polarity=SkillPolarity.NEGATIVE,
+            top_k=top_k,
+        )
+
+    def record_activation(
+        self,
+        skill_id: str,
+        improvement: float,
+        task_name: str | None = None,
+        phase: str | None = None,
+    ):
         """记录一次激活结果。"""
         if skill_id in self.skills:
-            self.skills[skill_id].evidence.record(improvement)
+            self.skills[skill_id].evidence.record(
+                improvement,
+                task_name=task_name,
+                phase=phase,
+            )
 
     def get_skill_history(
         self, task_name: str | None = None, limit: int = 10
@@ -78,42 +113,58 @@ class SkillLibrary:
         items = list(self.skills.values())
         if task_name:
             items = [s for s in items if s.task_origin == task_name]
-        # 按 ID（含时序信息）倒序
         items.sort(key=lambda s: s.skill_id, reverse=True)
         return [
             {
                 "axis": s.axis.value,
+                "level": s.level.value,
+                "polarity": s.polarity.value,
                 "summary": s.source_observation,
                 "improvement": s.evidence.avg_improvement,
-                "idea": s.guidance.get("idea", s.guidance.get("mode", ""))[:100],
+                "idea": (
+                    s.guidance.get("idea")
+                    or s.guidance.get("pattern")
+                    or s.guidance.get("objective")
+                    or s.guidance.get("failure_pattern")
+                    or ""
+                )[:100],
             }
             for s in items[:limit]
         ]
 
-    def get_catalog(self) -> list[dict]:
-        """返回所有 skill 的 one-liner catalog（供 orchestrator LLM 选择用）。"""
+    def get_catalog(
+        self,
+        polarity: SkillPolarity | None = SkillPolarity.POSITIVE,
+    ) -> list[dict]:
+        """返回 skill catalog（供 orchestrator 选择）。"""
+        items = self.skills.values()
+        if polarity is not None:
+            items = [s for s in items if s.polarity == polarity]
         return [
             {
                 "skill_id": s.skill_id,
                 "axis": s.axis.value,
+                "level": s.level.value,
+                "polarity": s.polarity.value,
                 "description": s.description,
                 "activations": s.evidence.activations,
                 "avg_improvement": s.evidence.avg_improvement,
+                "task_tags": s.task_tags,
+                "trigger_diagnostics": s.trigger_diagnostics,
             }
-            for s in self.skills.values()
+            for s in items
         ]
 
     def get_evidence_summary(self) -> dict:
         """返回所有 skill 的 evidence 摘要。"""
         by_axis: dict[str, list] = {}
         for s in self.skills.values():
-            axis_name = s.axis.value
-            if axis_name not in by_axis:
-                by_axis[axis_name] = []
-            by_axis[axis_name].append(
+            axis_name = f"{s.polarity.value}:{s.axis.value}:{s.level.value}"
+            by_axis.setdefault(axis_name, []).append(
                 {
                     "id": s.skill_id,
                     "task": s.task_origin,
+                    "task_tags": s.task_tags,
                     "activations": s.evidence.activations,
                     "avg_improvement": s.evidence.avg_improvement,
                     "success_rate": s.evidence.success_rate,
@@ -121,22 +172,26 @@ class SkillLibrary:
             )
         return by_axis
 
-    def prune(self, max_per_axis: int = 20):
-        """清理低效 skill，每个 axis 保留最优的 N 个。"""
-        by_axis: dict[SkillAxis, list[GeneratedSkill]] = {}
+    def prune(self, max_per_bucket: int = 20):
+        """清理低效 skill，每个 polarity/axis/level 保留最优的 N 个。"""
+        by_bucket: dict[tuple[SkillPolarity, SkillAxis, SkillLevel], list[GeneratedSkill]] = {}
         for s in self.skills.values():
-            by_axis.setdefault(s.axis, []).append(s)
+            by_bucket.setdefault((s.polarity, s.axis, s.level), []).append(s)
 
         keep_ids = set()
-        for axis, skills in by_axis.items():
-            # 保留 evidence 最好的 + 最新的（给新 skill 机会）
+        for _bucket, skills in by_bucket.items():
             scored = sorted(
-                skills, key=lambda s: s.evidence.avg_improvement, reverse=True
+                skills,
+                key=lambda s: (
+                    s.evidence.avg_improvement,
+                    s.evidence.success_rate,
+                    s.generation,
+                ),
+                reverse=True,
             )
-            for s in scored[:max_per_axis]:
+            for s in scored[:max_per_bucket]:
                 keep_ids.add(s.skill_id)
-            # 也保留最新的几个（即使 evidence 不好）
-            newest = sorted(skills, key=lambda s: s.skill_id, reverse=True)
+            newest = sorted(skills, key=lambda s: s.generation, reverse=True)
             for s in newest[:3]:
                 keep_ids.add(s.skill_id)
 
@@ -150,14 +205,22 @@ class SkillLibrary:
         for sid, skill in self.skills.items():
             data[sid] = {
                 "axis": skill.axis.value,
+                "level": skill.level.value,
+                "polarity": skill.polarity.value,
                 "description": skill.description,
                 "guidance": skill.guidance,
                 "source_observation": skill.source_observation,
                 "task_origin": skill.task_origin,
                 "generation": skill.generation,
+                "task_tags": skill.task_tags,
+                "applicable_stages": skill.applicable_stages,
+                "trigger_diagnostics": skill.trigger_diagnostics,
+                "source_skill_ids": skill.source_skill_ids,
                 "evidence": {
                     "activations": skill.evidence.activations,
                     "improvements": skill.evidence.improvements,
+                    "matched_tasks": skill.evidence.matched_tasks,
+                    "matched_phases": skill.evidence.matched_phases,
                 },
             }
         self._persist_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -172,15 +235,23 @@ class SkillLibrary:
             evidence = SkillEvidence(
                 activations=d.get("evidence", {}).get("activations", 0),
                 improvements=d.get("evidence", {}).get("improvements", []),
+                matched_tasks=d.get("evidence", {}).get("matched_tasks", []),
+                matched_phases=d.get("evidence", {}).get("matched_phases", []),
             )
             skill = GeneratedSkill(
                 skill_id=sid,
-                axis=SkillAxis(d["axis"]),
+                axis=SkillAxis(d.get("axis", "strategy")),
+                level=SkillLevel(d.get("level", "ephemeral")),
+                polarity=SkillPolarity(d.get("polarity", "positive")),
                 description=d.get("description", ""),
-                guidance=d["guidance"],
+                guidance=d.get("guidance", {}),
                 source_observation=d.get("source_observation", ""),
                 task_origin=d.get("task_origin", ""),
                 generation=d.get("generation", 0),
+                task_tags=d.get("task_tags", []),
+                applicable_stages=d.get("applicable_stages", []),
+                trigger_diagnostics=d.get("trigger_diagnostics", []),
+                source_skill_ids=d.get("source_skill_ids", []),
                 evidence=evidence,
             )
             self.skills[sid] = skill
