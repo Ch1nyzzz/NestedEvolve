@@ -1,0 +1,30 @@
+{
+  "skill_id": "system_starter_target_analysis",
+  "axis": "diagnosis",
+  "level": "general",
+  "polarity": "positive",
+  "description": "启动时先分析 target task、evaluator 和候选方法空间",
+  "guidance": {
+    "principle": "在冷启动阶段先理解 evaluator 真正奖励什么、哪些约束会导致零分，以及应该优先探索哪些候选方法族，再进入定向变异。",
+    "heuristics": [
+      "先拆解任务目标、输入输出和 EVOLVE-BLOCK 的可变范围",
+      "先读清评分信号、惩罚项和硬约束，再决定第一批搜索方向",
+      "把候选方法族说清楚，避免 evolver 一上来只做低价值局部改动"
+    ],
+    "transfer_rule": "适用于每个 task 的首次冷启动分析；后续可复用该 task 的分析结果作为 general guidance。"
+  },
+  "task_origin": "global",
+  "generation": 0,
+  "applicable_stages": [
+    "early"
+  ],
+  "trigger_diagnostics": [
+    "starter_analysis",
+    "cold_start"
+  ],
+  "hook_name": "system_starter_target_analysis",
+  "hook_mode": "task_once",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "protected": true
+}

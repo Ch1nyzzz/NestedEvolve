@@ -1,0 +1,260 @@
+{
+  "task": "circle_packing",
+  "baseline": 0.36423689449571406,
+  "final_best": 0.9624027830261718,
+  "improvement": 0.5981658885304577,
+  "skills_used": [
+    "positive_template_reflection_circle_packing_11_2",
+    "positive_template_reflection_circle_packing_17_4",
+    "positive_template_reflection_circle_packing_24_6",
+    "positive_template_reflection_circle_packing_31_8",
+    "positive_template_reflection_circle_packing_40_10",
+    "search_diverse_restart",
+    "search_elite_exploitation",
+    "search_error_guided_repair",
+    "search_ucb_exploration",
+    "system_starter_target_analysis"
+  ],
+  "n_skills_generated": 16,
+  "elapsed_sec": 6067.36958527565,
+  "trajectory": "Task: circle_packing\nTotal improvement: 0.598166\nSkills used: positive_template_reflection_circle_packing_11_2, positive_template_reflection_circle_packing_17_4, positive_template_reflection_circle_packing_24_6, positive_template_reflection_circle_packing_31_8, positive_template_reflection_circle_packing_40_10, search_diverse_restart, search_elite_exploitation, search_error_guided_repair, search_ucb_exploration, system_starter_target_analysis\nAnti-skills used: negative_ephemeral_reflection_circle_packing_11_3, negative_ephemeral_reflection_circle_packing_17_5, negative_ephemeral_reflection_circle_packing_24_7, negative_ephemeral_reflection_circle_packing_31_9, negative_ephemeral_reflection_circle_packing_40_11\n  Segment 0: 0.3642 → 0.9624 (Δ=0.5982, skills=[positive_template_reflection_circle_packing_11_2, positive_template_reflection_circle_packing_17_4, positive_template_reflection_circle_packing_24_6, positive_template_reflection_circle_packing_31_8, positive_template_reflection_circle_packing_40_10, search_diverse_restart, search_elite_exploitation, search_error_guided_repair, search_ucb_exploration, system_starter_target_analysis], anti=[negative_ephemeral_reflection_circle_packing_11_3, negative_ephemeral_reflection_circle_packing_17_5, negative_ephemeral_reflection_circle_packing_24_7, negative_ephemeral_reflection_circle_packing_31_9, negative_ephemeral_reflection_circle_packing_40_11])\n    selections: iter 47 (batch=8): skills=search_ucb_exploration,search_error_guided_repair,positive_template_reflection_circle_packing_40_10 anti=negative_ephemeral_reflection_circle_packing_40_11,negative_ephemeral_reflection_circle_packing_31_9; iter 48 (batch=8): skills=search_error_guided_repair,search_diverse_restart,positive_template_reflection_circle_packing_40_10 anti=negative_ephemeral_reflection_circle_packing_40_11,negative_ephemeral_reflection_circle_packing_31_9; iter 49 (batch=8): skills=search_error_guided_repair,search_diverse_restart,positive_template_reflection_circle_packing_40_10 anti=negative_ephemeral_reflection_circle_packing_40_11,negative_ephemeral_reflection_circle_packing_31_9\n    step 55: score=0.9537 Δ=0.0000 skills=[search_error_guided_repair, search_diverse_restart, positive_template_reflection_circle_packing_40_10] anti=[negative_ephemeral_reflection_circle_packing_40_11, negative_ephemeral_reflection_circle_packing_31_9] outcome=regression\n    step 56: score=0.9560 Δ=0.0000 skills=[search_error_guided_repair, search_diverse_restart, positive_template_reflection_circle_packing_40_10] anti=[negative_ephemeral_reflection_circle_packing_40_11, negative_ephemeral_reflection_circle_packing_31_9] outcome=local_improvement\n    step 57: score=0.9512 Δ=0.0000 skills=[search_error_guided_repair, search_diverse_restart, positive_template_reflection_circle_packing_40_10] anti=[negative_ephemeral_reflection_circle_packing_40_11, negative_ephemeral_reflection_circle_packing_31_9] outcome=local_improvement",
+  "evidence": {
+    "positive:diagnosis:general": [
+      {
+        "id": "system_starter_target_analysis",
+        "task": "global",
+        "task_tags": [],
+        "activations": 5,
+        "avg_improvement": 0.07895527764734675,
+        "success_rate": 0.8
+      }
+    ],
+    "positive:strategy:general": [
+      {
+        "id": "search_diverse_restart",
+        "task": "global",
+        "task_tags": [],
+        "activations": 26,
+        "avg_improvement": 0.00036139865404452023,
+        "success_rate": 0.1
+      },
+      {
+        "id": "search_elite_exploitation",
+        "task": "global",
+        "task_tags": [],
+        "activations": 4,
+        "avg_improvement": 0.01897533206831123,
+        "success_rate": 0.25
+      },
+      {
+        "id": "search_error_guided_repair",
+        "task": "global",
+        "task_tags": [],
+        "activations": 28,
+        "avg_improvement": 0.002704864100195448,
+        "success_rate": 0.25
+      },
+      {
+        "id": "search_ucb_exploration",
+        "task": "global",
+        "task_tags": [],
+        "activations": 29,
+        "avg_improvement": 0.0023434688614478614,
+        "success_rate": 0.15
+      }
+    ],
+    "positive:reflection:general": [
+      {
+        "id": "positive_general_reflection_circle_packing_11_1",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 0,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      }
+    ],
+    "positive:reflection:template": [
+      {
+        "id": "positive_template_reflection_circle_packing_11_2",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 4,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_circle_packing_17_4",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 7,
+        "avg_improvement": 5.963642278418644e-13,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_circle_packing_24_6",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 4,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_circle_packing_31_8",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 5,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_circle_packing_40_10",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 10,
+        "avg_improvement": 0.012748810371871488,
+        "success_rate": 0.6
+      }
+    ],
+    "negative:reflection:ephemeral": [
+      {
+        "id": "negative_ephemeral_reflection_circle_packing_11_3",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 17,
+        "avg_improvement": 4.017750831377414e-09,
+        "success_rate": 0.0
+      },
+      {
+        "id": "negative_ephemeral_reflection_circle_packing_17_5",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 18,
+        "avg_improvement": 3.794542451856447e-09,
+        "success_rate": 0.0
+      },
+      {
+        "id": "negative_ephemeral_reflection_circle_packing_24_7",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 16,
+        "avg_improvement": 0.00458693062577472,
+        "success_rate": 0.0625
+      },
+      {
+        "id": "negative_ephemeral_reflection_circle_packing_31_9",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 15,
+        "avg_improvement": 0.008499206914580993,
+        "success_rate": 0.4
+      },
+      {
+        "id": "negative_ephemeral_reflection_circle_packing_40_11",
+        "task": "circle_packing",
+        "task_tags": [
+          "fast",
+          "dense",
+          "continuous",
+          "monolithic",
+          "highly_multimodal",
+          "hard",
+          "maximize",
+          "medium"
+        ],
+        "activations": 6,
+        "avg_improvement": 0.009016202284386562,
+        "success_rate": 0.8333333333333334
+      }
+    ]
+  }
+}

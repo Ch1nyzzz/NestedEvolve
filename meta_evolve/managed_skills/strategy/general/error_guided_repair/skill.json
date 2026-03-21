@@ -1,0 +1,22 @@
+{
+  "skill_id": "search_error_guided_repair",
+  "axis": "strategy",
+  "level": "general",
+  "polarity": "positive",
+  "description": "Error-guided repair strategy: targeted repair for frequently failing candidates by injecting error information into the prompt",
+  "guidance": {
+    "principle": "When many candidates fail due to syntax errors / runtime errors / constraint violations, do not retry blindly — instead, provide the failure information to the LLM for targeted repair.",
+    "mode": "error_guided_repair",
+    "actions": ["elite parent", "inject error into prompt", "low-temperature targeted repair"]
+  },
+  "task_origin": "global",
+  "generation": 0,
+  "task_tags": [],
+  "applicable_stages": ["early", "mid", "stalled"],
+  "trigger_diagnostics": ["syntax_failures", "runtime_failures", "regression"],
+  "hook_name": "search_error_guided_repair",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "protected": true
+}

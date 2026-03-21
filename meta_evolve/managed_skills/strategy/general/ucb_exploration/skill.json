@@ -1,0 +1,22 @@
+{
+  "skill_id": "search_ucb_exploration",
+  "axis": "strategy",
+  "level": "general",
+  "polarity": "positive",
+  "description": "UCB exploration strategy: balance exploitation of known high-scoring individuals and exploration of under-selected ones, select diverse top-k for context",
+  "guidance": {
+    "principle": "When the population converges or stagnates, use the UCB1 formula to select parents so under-explored individuals get tried, while diverse context introduces different perspectives.",
+    "mode": "ucb_exploration",
+    "actions": ["UCB1 parent selection", "diverse context building", "medium-high temperature"]
+  },
+  "task_origin": "global",
+  "generation": 0,
+  "task_tags": [],
+  "applicable_stages": ["mid", "stalled"],
+  "trigger_diagnostics": ["stagnation", "convergence", "low_diversity"],
+  "hook_name": "search_ucb_exploration",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "protected": true
+}

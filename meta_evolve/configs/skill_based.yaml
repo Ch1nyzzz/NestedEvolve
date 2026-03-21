@@ -2,14 +2,14 @@
 
 # LLM
 llm:
-  model: "together_ai/MiniMaxAI/MiniMax-M2.5"
-  max_tokens: 4096
+  model: "together_ai/moonshotai/Kimi-K2.5"
+  max_tokens: 8192
 
 # 内层进化循环
 inner_loop:
-  n_steps: 20
+  n_iterations: 20
+  batch_size: 8
   max_pop_size: 30
-  analyze_interval: 5
 
 # 策略默认初始值
 strategy:
@@ -24,7 +24,6 @@ strategy:
   show_context_scores: 0.7
   domain_hint: 0.5
   llm_temperature: 0.7
-  max_tokens_ratio: 0.5
   parent_best_bias: 0.7
   crossover_rate: 0.0
 
@@ -32,29 +31,28 @@ strategy:
 skill_meta:
   n_meta_steps: 10
   tasks_per_step: 3
-  n_segments: 3
-  steps_per_segment: 10
-  max_active_skills: 3
+  n_iterations: 30
 
 # Skill Orchestrator
 orchestrator:
   max_active_skills: 3
-  selection_interval_steps: 1
-  generation_interval_steps: 10
+  selection_trial_iters: 5
+  generation_interval_iters: 5
   max_generate_per_window: 1
+  batch_size: 8
 
 # 任务划分
 tasks:
   train:
-    - circle_packing
-    - first_autocorr_ineq
-    - heilbronn_triangle
-    - second_autocorr_ineq
-    - third_autocorr_ineq
+    - math/circle_packing
+    - math/first_autocorr_ineq
+    - math/heilbronn_triangle
+    - math/second_autocorr_ineq
+    - math/third_autocorr_ineq
   test:
-    - circle_packing_rect
-    - erdos_min_overlap
-    - matmul
-    - signal_processing
-    - sums_diffs_finite_sets
-    - uncertainty_ineq
+    - math/circle_packing_rect
+    - math/erdos_min_overlap
+    - math/matmul
+    - math/signal_processing
+    - math/sums_diffs_finite_sets
+    - math/uncertainty_ineq

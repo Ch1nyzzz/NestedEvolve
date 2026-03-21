@@ -1,0 +1,22 @@
+{
+  "skill_id": "search_diverse_restart",
+  "axis": "strategy",
+  "level": "general",
+  "polarity": "positive",
+  "description": "Diverse restart strategy: start from the most dissimilar individuals in the population, high mutation + high temperature to escape local optima",
+  "guidance": {
+    "principle": "When severely stagnated, force escape from local optima by starting from diverse individuals with high-intensity mutation to find entirely new directions.",
+    "mode": "diverse_restart",
+    "actions": ["random/tournament parent", "diverse context", "high temperature high mutation"]
+  },
+  "task_origin": "global",
+  "generation": 0,
+  "task_tags": [],
+  "applicable_stages": ["stalled"],
+  "trigger_diagnostics": ["stagnation", "convergence", "low_diversity", "no_effect"],
+  "hook_name": "search_diverse_restart",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "protected": true
+}
