@@ -48,6 +48,7 @@ class SkillOrchestrator:
         llm=None,
         config: dict | None = None,
         fresh: bool = False,
+        mode: str = "mega",  # "mega" = 生成新 skill, "normal" = 只用已有 skill
     ):
         self.library = library
         self.generator = generator
@@ -75,6 +76,7 @@ class SkillOrchestrator:
         self.batch_size = max(
             1, int(orchestrator_cfg.get("batch_size", 8))
         )
+        self.mode = mode
         self._last_generation_iter = -999
         self._active_search_policy: dict[str, Any] = {}
         self._managed_skills, self._skill_hooks = load_managed_skills(
@@ -622,6 +624,8 @@ class SkillOrchestrator:
         return "strategy"
 
     def _should_attempt_generation(self, obs: dict[str, Any]) -> bool:
+        if self.mode == "normal":
+            return False
         if self.max_generate_per_window <= 0:
             return False
 

@@ -113,6 +113,7 @@ async def run_skill_evolve(args, config):
 
     profile = get_task_profile(task_name)
     adapter = NativeAdapter(llm_model=config["llm"]["model"], params=params, llm=llm)
+    mode = getattr(args, "mode", "mega")
     orchestrator = SkillOrchestrator(
         library=library,
         generator=generator,
@@ -120,7 +121,9 @@ async def run_skill_evolve(args, config):
         adapter=adapter,
         config=config,
         fresh=getattr(args, "fresh", False),
+        mode=mode,
     )
+    print(f"  Mode: {mode} ({'生成+使用' if mode == 'mega' else '仅使用已有skills'})")
 
     t0 = time.time()
     result = await orchestrator.run(
@@ -156,32 +159,35 @@ async def run_skill_evolve(args, config):
     print(f"  Skill library 已保存到 {library_path}")
     print(f"  Task analysis artifacts 已保存到 {task_artifact_path}")
 
-    # 自动 archive 本次运行的 skills
-    run_name = getattr(args, "run_name", None)
-    if not run_name:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        run_name = f"{task_name.replace('/', '_')}_{ts}"
-    moved, archive_path = archive_run_skills(run_name)
-    if moved:
-        print(f"  已归档 {moved} 个 skills 到 {archive_path}")
+    # 自动 archive + wrap（仅 mega 模式）
+    if mode == "mega":
+        run_name = getattr(args, "run_name", None)
+        if not run_name:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            run_name = f"{task_name.replace('/', '_')}_{ts}"
+        moved, archive_path = archive_run_skills(run_name)
+        if moved:
+            print(f"  已归档 {moved} 个 skills 到 {archive_path}")
 
-    # Post-run skill wrap
-    from .skills.wrapper import apply_wrap_result, wrap_run_skills
-    print("  正在整理归纳 skills ...")
-    wrap_result = await wrap_run_skills(task_name, archive_path, out, llm)
-    counts = apply_wrap_result(archive_path, wrap_result)
-    print(
-        f"  Skill wrap 完成: "
-        f"{counts['promoted']} promoted, "
-        f"{counts['kept']} kept, "
-        f"{counts.get('updated', 0)} updated existing, "
-        f"{counts['pruned']} pruned"
-    )
-    # 保存 wrap 结果
-    wrap_out = archive_path / "wrap_result.json"
-    with open(wrap_out, "w") as f:
-        json.dump(wrap_result, f, indent=2, ensure_ascii=False)
-    print(f"  Wrap 结果已保存到 {wrap_out}")
+        from .skills.wrapper import apply_wrap_result, wrap_run_skills
+        print("  正在整理归纳 skills ...")
+        wrap_result = await wrap_run_skills(task_name, archive_path, out, llm)
+        counts = apply_wrap_result(archive_path, wrap_result)
+        print(
+            f"  Skill wrap 完成: "
+            f"{counts['promoted']} promoted, "
+            f"{counts['kept']} kept, "
+            f"{counts.get('updated', 0)} updated existing, "
+            f"{counts['pruned']} pruned"
+        )
+        wrap_out = archive_path / "wrap_result.json"
+        with open(wrap_out, "w") as f:
+            json.dump(wrap_result, f, indent=2, ensure_ascii=False)
+        print(f"  Wrap 结果已保存到 {wrap_out}")
+    else:
+        # normal 模式清理 temporary skills
+        refresh_skills()
+        print("  Normal 模式: 已清理 temporary skills")
 
 
 async def run_skill_meta(args, config):
@@ -295,6 +301,8 @@ def main():
     p_skill.add_argument("--task", required=True, help="benchmark 名称（如 ADRS/cloudcast）")
     p_skill.add_argument("--iterations", type=int, default=50, help="迭代数")
     p_skill.add_argument("--fresh", action="store_true", help="先 refresh 再跑（只用 starter skills）")
+    p_skill.add_argument("--mode", choices=["mega", "normal"], default="mega",
+                         help="mega=生成新skill+使用已有, normal=只使用已有skill不生成新的")
     p_skill.add_argument("--run-name", default=None, help="运行名称（用于 archive，默认自动生成）")
     _add_common(p_skill)
 
