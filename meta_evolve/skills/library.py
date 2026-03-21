@@ -117,6 +117,7 @@ class SkillLibrary:
         stagnation: int = 0,
         error_rate: float = 0.0,
         co_active_count: int = 1,
+        outcome_type: str = "neutral",
     ):
         """记录一次激活结果。"""
         if skill_id in self.skills:
@@ -127,6 +128,7 @@ class SkillLibrary:
                 stagnation=stagnation,
                 error_rate=error_rate,
                 co_active_count=co_active_count,
+                outcome_type=outcome_type,
             )
 
     def get_skill_history(
@@ -144,6 +146,7 @@ class SkillLibrary:
                 "polarity": s.polarity.value,
                 "summary": s.source_observation,
                 "improvement": s.evidence.avg_improvement,
+                "outcome_summary": s.evidence.outcome_summary,
                 "idea": (
                     s.guidance.get("idea")
                     or s.guidance.get("pattern")
@@ -172,6 +175,7 @@ class SkillLibrary:
                 "description": s.description,
                 "activations": s.evidence.activations,
                 "avg_improvement": s.evidence.avg_improvement,
+                "outcome_summary": s.evidence.outcome_summary,
                 "task_tags": s.task_tags,
                 "trigger_diagnostics": s.trigger_diagnostics,
             }
@@ -244,6 +248,8 @@ class SkillLibrary:
                     "hook_path": skill.hook_path,
                     "hook_entrypoint": skill.hook_entrypoint,
                     "protected": skill.protected,
+                    "parent_skill_id": skill.parent_skill_id,
+                    "edit_generation": skill.edit_generation,
                     "evidence": {
                         "activations": skill.evidence.activations,
                         "improvements": skill.evidence.improvements,
@@ -252,6 +258,7 @@ class SkillLibrary:
                         "stagnation_levels": skill.evidence.stagnation_levels,
                         "error_rates": skill.evidence.error_rates,
                         "co_active_counts": skill.evidence.co_active_counts,
+                        "outcome_types": skill.evidence.outcome_types,
                     },
                 }
             self._persist_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
@@ -277,6 +284,7 @@ class SkillLibrary:
                 stagnation_levels=ev.get("stagnation_levels", []),
                 error_rates=ev.get("error_rates", []),
                 co_active_counts=ev.get("co_active_counts", []),
+                outcome_types=ev.get("outcome_types", []),
             )
             skill = GeneratedSkill(
                 skill_id=sid,
@@ -298,6 +306,8 @@ class SkillLibrary:
                 hook_path=d.get("hook_path"),
                 hook_entrypoint=d.get("hook_entrypoint"),
                 protected=bool(d.get("protected", False)),
+                parent_skill_id=d.get("parent_skill_id"),
+                edit_generation=int(d.get("edit_generation", 0)),
                 evidence=evidence,
             )
             self.skills[sid] = skill

@@ -1,0 +1,31 @@
+# positive_template_reflection_math/circle_packing_4_1
+
+- axis: `reflection`
+- level: `template`
+- polarity: `positive`
+- mode: `executable`
+- task_origin: `math/circle_packing`
+
+## Summary
+Introduce a deterministic, seed‑controlled CMA‑ES global search over circle centres with cheap feasibility repair and periodic local polishing
+
+## Guidance
+```json
+{
+  "idea": "Replace the single‑point Nelder‑Mead optimisation with a modest‑size CMA‑ES population that evolves the 52‑dimensional centre vector, using the existing LP‑based radius computation as fitness, a strong overlap penalty to keep candidates feasible, and a lightweight repulsive‑force repair step; restart the population when stagnation is detected and finish with a short Nelder‑Mead polish on the best individuals.",
+  "actions": [
+    "Create a deterministic initial population (size ≤ 30) of centre vectors using four heuristics: (a) the current 5×5 grid + extra point, (b) uniform random points, (c) a simple force‑directed layout that iteratively pushes circles apart, and (d) a greedy inflation layout that places circles one‑by‑one with maximal feasible radius. Seed NumPy's RNG with a fixed integer (e.g., 42) for reproducibility.",
+    "Run a CMA‑ES loop (e.g., 20 generations) on the centre vectors. For each candidate, compute radii with `compute_max_radii`, obtain `sum_radii`, and compute an overlap penalty as the sum of squared violations `max(0, r_i+r_j - dist_ij)^2`. Define fitness = `sum_radii - λ * overlap_penalty` with λ ≈ 1e3. Clip centre coordinates to the unit square after each mutation.",
+    "After each CMA‑ES generation, apply a cheap repair operator to every individual: for each overlapping pair, move the two centres apart along the line joining them by 0.5 × the excess distance, repeat up to 5 times, and re‑clip to [0,1]. This improves feasibility before the next generation.",
+    "Every 5 generations, select the top‑3 individuals and run a brief Nelder‑Mead optimisation (max 200 iterations) on their centre vectors using the same LP‑based objective to fine‑tune them.",
+    "Monitor stagnation: if the best `target_ratio` has not improved for `stagnation_limit` generations (default 10) or if the population diversity (average pairwise centre distance) falls below a threshold, replace the worst 5 individuals with fresh heuristic solutions (random jitter around the current best or a newly generated force‑directed layout).",
+    "Terminate when the evaluation budget (~2000 LP solves) is exhausted or when `target_ratio` exceeds 0.99 × the benchmark (≈ 2.61). Return the best centre set, its radii from `compute_max_radii`, and the summed radius."
+  ],
+  "cautions": "• The LP solve dominates runtime; keep population ≤ 30 and generations ≤ 20 to stay under the ~2 s per‑evaluation budget. • Use a large penalty λ (≈ 1e3) so infeasible candidates receive a very low fitness and are quickly discarded. • After repair, always clip centres back to [0,1] to respect the unit‑square constraint. • Fix the random seed (e.g., `np.random.seed(42)`) so the whole CMA‑ES run is deterministic for reproducibility. • If `compute_max_radii` fails (non‑convergent LP), treat the candidate as zero‑radius and penalise heavily.",
+  "approach_type": "population‑based global optimisation (CMA‑ES with repair & periodic local polishing)"
+}
+```
+
+## Hook
+- entrypoint: `run`
+- mode: `always`

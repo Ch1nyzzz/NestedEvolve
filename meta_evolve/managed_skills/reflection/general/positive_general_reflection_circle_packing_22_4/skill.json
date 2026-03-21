@@ -1,0 +1,50 @@
+{
+  "skill_id": "positive_general_reflection_circle_packing_22_4",
+  "axis": "reflection",
+  "level": "general",
+  "polarity": "positive",
+  "description": "When the current deterministic, staged solution shows no improvement, guide the LLM to propose a joint, global optimisation that directly maximises the overall objective while handling constraints via penalties.",
+  "guidance": {
+    "idea": "Detect plateaus in score improvement; replace the existing pipeline (e.g., generate‑then‑solve) with a single optimisation loop that optimises all free parameters together.",
+    "transfer_rule": "Apply to any task where the code separates structure generation from a downstream optimisation (e.g., layout → LP, model → training).",
+    "actions": [
+      "Monitor recent generations; if improvement < ε for k iterations, flag a plateau.",
+      "Prompt the LLM: *“Replace the two‑stage approach with a single global optimiser that treats all parameters as free variables. Use a penalty‑based fitness to enforce constraints.”*",
+      "Suggest seeding the new optimiser with the best‑so‑far solution to preserve useful knowledge.",
+      "Require the LLM to emit code that calls a gradient‑free optimiser (CMA‑ES, DE, etc.) and computes a penalised objective."
+    ],
+    "cautions": [
+      "Ensure the new optimiser respects any hard runtime limits.",
+      "Keep the penalty formulation well‑scaled to avoid numerical instability.",
+      "Validate that the generated code still compiles and runs before evaluation."
+    ]
+  },
+  "source_observation": "{\"task\": \"circle_packing\", \"best_score\": 0.996289030473469, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"has_effective_edits\"], \"failure_breakdown\": {\"regression\": 69, \"global_improvement\": 25, \"local_improvement\": 55, \"no_change\": 1, \"no_effect\": 15, \"extraction\": 9, \"runtime_error\": 9, \"timeout\": 4}}",
+  "task_origin": "circle_packing",
+  "generation": 22,
+  "task_tags": [
+    "fast",
+    "dense",
+    "continuous",
+    "monolithic",
+    "highly_multimodal",
+    "hard",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [],
+  "hook_name": null,
+  "hook_mode": null,
+  "hook_file": null,
+  "hook_entrypoint": null,
+  "status": "archived"
+}

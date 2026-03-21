@@ -1,0 +1,56 @@
+{
+  "skill_id": "positive_template_reflection_math/circle_packing_33_10",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Apply a deterministic feasibility‑preserving simulated‑annealing refinement to a seed layout before a final gradient‑based optimisation.",
+  "guidance": {
+    "idea": "Starting from a deterministic seed (e.g., a hexagonal lattice), run a simulated‑annealing loop that only accepts moves which keep the layout feasible (no overlaps, inside bounds). Use a deterministic pseudo‑random generator so the whole process is reproducible. After annealing, compute the exact uniform size via the LP step and finish with a short SLSQP polish.",
+    "transfer_rule": "Useful for any layout or packing problem where feasibility can be checked quickly and a deterministic annealing schedule is desired.",
+    "actions": [
+      "Seed the layout with a simple deterministic pattern.",
+      "Run a fixed‑schedule simulated‑annealing loop:",
+      " Generate a candidate move (e.g., perturb a centre).",
+      " Reject the move if it violates feasibility.",
+      " Accept the move according to a deterministic temperature schedule.",
+      "After annealing, compute the optimal uniform size (e.g., via LP).",
+      "Run a brief SLSQP refinement on the positions."
+    ],
+    "cautions": [
+      "The annealing temperature schedule must be deterministic to keep the pipeline reproducible.",
+      "Only feasibility‑preserving moves are allowed; this may limit exploration if the schedule is too aggressive.",
+      "Ensure the final SLSQP step respects the time budget."
+    ]
+  },
+  "source_observation": "{\"task\": \"math/circle_packing\", \"best_score\": 0.9974991037081988, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\", \"has_effective_edits\"], \"failure_breakdown\": {\"global_improvement\": 20, \"regression\": 84, \"local_improvement\": 49, \"no_effect\": 106, \"extraction\": 5, \"runtime_error\": 5}}",
+  "task_origin": "math/circle_packing",
+  "generation": 33,
+  "task_tags": [
+    "medium",
+    "dense",
+    "continuous",
+    "monolithic",
+    "few_modes",
+    "none",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_math/circle_packing_5_1"
+  ],
+  "hook_name": "generated_reflection",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "status": "archived"
+}

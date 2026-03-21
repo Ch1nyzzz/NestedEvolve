@@ -1,0 +1,53 @@
+{
+  "skill_id": "positive_template_reflection_math/circle_packing_28_8",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Combine a small‑population Differential Evolution search over object centre coordinates with an exact linear‑program computation of the maximal uniform size for each candidate, followed by a short local gradient‑based polish.",
+  "guidance": {
+    "idea": "Run DE on the continuous variables representing object positions. For every DE individual, solve an LP that maximises the common size subject to non‑overlap constraints (the LP is exact for a fixed set of centres). Take the best DE individuals and run a few iterations of the existing local optimiser (e.g., SLSQP) to fine‑tune the positions.",
+    "transfer_rule": "Best suited for packing problems where the maximal uniform size can be expressed as a linear programme given fixed positions (e.g., circle/sphere packing, rectangle placement).",
+    "actions": [
+      "Initialize a small DE population with diverse centre coordinates.",
+      "Iterate DE generations using a simple overlap‑penalty fitness.",
+      "For each individual, solve the LP that yields the optimal uniform size.",
+      "Select the top‑k individuals and run a short SLSQP refinement on their positions.",
+      "Return the best feasible solution found."
+    ],
+    "cautions": [
+      "LP solves add overhead; keep the DE population small to respect runtime budgets.",
+      "DE is stochastic – use a fixed random seed if reproducibility is required.",
+      "Ensure the LP formulation correctly captures all non‑overlap constraints."
+    ]
+  },
+  "source_observation": "{\"task\": \"math/circle_packing\", \"best_score\": 0.9974989542616385, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\"], \"failure_breakdown\": {\"global_improvement\": 17, \"regression\": 72, \"local_improvement\": 46, \"no_effect\": 86, \"extraction\": 3, \"runtime_error\": 3}}",
+  "task_origin": "math/circle_packing",
+  "generation": 28,
+  "task_tags": [
+    "medium",
+    "dense",
+    "continuous",
+    "monolithic",
+    "few_modes",
+    "none",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_math/circle_packing_5_1"
+  ],
+  "hook_name": null,
+  "hook_mode": null,
+  "hook_file": null,
+  "hook_entrypoint": null,
+  "status": "archived"
+}

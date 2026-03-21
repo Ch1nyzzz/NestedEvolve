@@ -5,18 +5,38 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from ..config import managed_skills_dir
+from ..config import managed_skills_dir, skill_archives_dir
 from .models import GeneratedSkill, SkillAxis, SkillLevel, SkillPolarity
 
 STARTER_SKILL_ID = "system_starter_target_analysis"
 
+# status 三级：starter (始终可用) > archived (wrap 后收纳) > temporary (运行中生成)
+STATUS_STARTER = "starter"
+STATUS_ARCHIVED = "archived"
+STATUS_TEMPORARY = "temporary"
+
 ManagedHook = Callable[[dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
 
 
-def load_managed_skills() -> tuple[list[GeneratedSkill], dict[str, ManagedHook]]:
+def _read_status(data: dict) -> str:
+    """兼容旧格式：protected=True → starter，否则 temporary。"""
+    if "status" in data:
+        return data["status"]
+    return STATUS_STARTER if data.get("protected", False) else STATUS_TEMPORARY
+
+
+def load_managed_skills(
+    include_archived: bool = True,
+) -> tuple[list[GeneratedSkill], dict[str, ManagedHook]]:
+    """加载 managed skills。
+
+    include_archived=False 时只加载 starter，跳过 archived 和 temporary。
+    include_archived=True 时加载 starter + archived + temporary。
+    """
     skills: list[GeneratedSkill] = []
     hooks: dict[str, ManagedHook] = {}
     base_dir = managed_skills_dir()
@@ -28,6 +48,10 @@ def load_managed_skills() -> tuple[list[GeneratedSkill], dict[str, ManagedHook]]
         try:
             data = json.loads(meta_path.read_text())
         except (OSError, json.JSONDecodeError):
+            continue
+
+        status = _read_status(data)
+        if not include_archived and status != STATUS_STARTER:
             continue
 
         axis_name, level_name = _infer_axis_level_from_path(base_dir, skill_dir)
@@ -54,7 +78,7 @@ def load_managed_skills() -> tuple[list[GeneratedSkill], dict[str, ManagedHook]]
             skill_path=str(skill_dir),
             hook_path=str(hook_path) if hook_path else None,
             hook_entrypoint=hook_entrypoint,
-            protected=bool(data.get("protected", True)),
+            protected=status == STATUS_STARTER,
         )
         skills.append(skill)
         if hook_path and hook_path.exists() and hook_entrypoint:
@@ -98,18 +122,15 @@ def load_hook_for_skill(skill: GeneratedSkill) -> ManagedHook | None:
 
 
 def refresh_skills() -> int:
-    """删除所有非 starter 的 managed skills，清除持久化数据。返回删除数量。"""
-    import shutil
+    """删除 temporary skills，保留 starter 和 archived。清除持久化 JSON。"""
     from ..config import shared_skill_artifact_path, shared_skill_library_path
 
-    # 1. 删除持久化 JSON
     removed = 0
     for p in [shared_skill_library_path(), shared_skill_artifact_path()]:
         if p.exists():
             p.unlink()
             removed += 1
 
-    # 2. 删除非 protected 的 managed skill 目录
     base_dir = managed_skills_dir()
     if not base_dir.exists():
         return removed
@@ -120,16 +141,89 @@ def refresh_skills() -> int:
             data = json.loads(meta_path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("protected", False):
-            continue
-        shutil.rmtree(skill_dir)
-        removed += 1
+        status = _read_status(data)
+        if status == STATUS_TEMPORARY:
+            shutil.rmtree(skill_dir)
+            removed += 1
 
     return removed
 
 
+def archive_run_skills(run_name: str) -> tuple[int, Path]:
+    """把本次运行生成的 temporary skills 移动到 archive 目录。"""
+    base_dir = managed_skills_dir()
+    archive_dir = skill_archives_dir() / run_name
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    moved = 0
+    if not base_dir.exists():
+        return moved, archive_dir
+    for meta_path in sorted(base_dir.rglob("skill.json")):
+        skill_dir = meta_path.parent
+        try:
+            data = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        status = _read_status(data)
+        if status != STATUS_TEMPORARY:
+            continue
+        rel = skill_dir.relative_to(base_dir)
+        dst = archive_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(skill_dir), str(dst))
+        moved += 1
+    return moved, archive_dir
+
+
+def merge_skills(run_name: str, as_archived: bool = True) -> int:
+    """从 archive 目录复制 skills 到 managed_skills。
+
+    as_archived=True 时标记为 archived（不会被 refresh 删除）。
+    """
+    archive_dir = skill_archives_dir() / run_name
+    if not archive_dir.exists():
+        raise FileNotFoundError(f"Archive not found: {archive_dir}")
+    base_dir = managed_skills_dir()
+    merged = 0
+    for meta_path in sorted(archive_dir.rglob("skill.json")):
+        skill_dir = meta_path.parent
+        rel = skill_dir.relative_to(archive_dir)
+        dst = base_dir / rel
+        if dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(skill_dir), str(dst))
+        # 更新 status
+        if as_archived:
+            dst_meta = dst / "skill.json"
+            try:
+                data = json.loads(dst_meta.read_text())
+                data["status"] = STATUS_ARCHIVED
+                data.pop("protected", None)
+                dst_meta.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+            except (OSError, json.JSONDecodeError):
+                pass
+        merged += 1
+    return merged
+
+
+def list_archives() -> list[tuple[str, int]]:
+    """列出所有 archive 及其 skill 数。"""
+    archives_dir = skill_archives_dir()
+    result = []
+    for d in sorted(archives_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        count = len(list(d.rglob("skill.json")))
+        result.append((d.name, count))
+    return result
+
+
 async def run_managed_hook(hook: ManagedHook, context: dict[str, Any]) -> dict[str, Any] | None:
-    result = hook(context)
-    if inspect.isawaitable(result):
-        result = await result
-    return result if isinstance(result, dict) else None
+    try:
+        result = hook(context)
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, dict) else None
+    except Exception as e:
+        print(f"    [skill-hook-err] {e}")
+        return None

@@ -41,6 +41,7 @@ class SkillEvidence:
     stagnation_levels: list[int] = field(default_factory=list)
     error_rates: list[float] = field(default_factory=list)
     co_active_counts: list[int] = field(default_factory=list)
+    outcome_types: list[str] = field(default_factory=list)  # "effective" | "neutral" | "regressive"
 
     @property
     def avg_improvement(self) -> float:
@@ -60,6 +61,14 @@ class SkillEvidence:
     def confidence(self) -> float:
         return min(1.0, self.activations / 10.0)
 
+    @property
+    def outcome_summary(self) -> str:
+        if not self.outcome_types:
+            return "no data"
+        from collections import Counter
+        c = Counter(self.outcome_types)
+        return f"{c.get('effective', 0)}ok/{c.get('neutral', 0)}n/{c.get('regressive', 0)}bad"
+
     def record(
         self,
         improvement: float,
@@ -68,9 +77,11 @@ class SkillEvidence:
         stagnation: int = 0,
         error_rate: float = 0.0,
         co_active_count: int = 1,
+        outcome_type: str = "neutral",
     ):
         self.activations += 1
         self.improvements.append(improvement)
+        self.outcome_types.append(outcome_type)
         if task_name:
             self.matched_tasks.append(task_name)
             if len(self.matched_tasks) > 30:
@@ -92,6 +103,8 @@ class SkillEvidence:
             self.error_rates = self.error_rates[-cap:]
         if len(self.co_active_counts) > cap:
             self.co_active_counts = self.co_active_counts[-cap:]
+        if len(self.outcome_types) > cap:
+            self.outcome_types = self.outcome_types[-cap:]
 
 
 @dataclass
@@ -118,6 +131,8 @@ class GeneratedSkill:
     hook_entrypoint: str | None = None
     hook_source: str | None = None
     protected: bool = False
+    parent_skill_id: str | None = None  # 如果是 edit 产物，指向被编辑的 skill
+    edit_generation: int = 0  # 该 skill 被编辑的次数
     evidence: SkillEvidence = field(default_factory=SkillEvidence)
 
     @property

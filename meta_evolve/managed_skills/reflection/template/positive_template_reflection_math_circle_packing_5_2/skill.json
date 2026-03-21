@@ -1,0 +1,54 @@
+{
+  "skill_id": "positive_template_reflection_math/circle_packing_5_2",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Run a deterministic continuous optimiser (e.g., SciPy SLSQP) to directly maximise a common size variable under box and non‑overlap constraints, seeded from a good initial layout.",
+  "guidance": {
+    "idea": "Formulate the problem with variables (x_i, y_i, r) where r is the uniform radius. Impose box constraints for each centre and pairwise non‑overlap constraints (distance ≥ 2r). Initialise the optimiser with a high‑quality seed (e.g., a hexagonal lattice) so that only a few iterations are needed. Execute SLSQP with a strict iteration limit to stay within the evaluation budget.",
+    "transfer_rule": "Applicable to any optimisation task that can be expressed with continuous variables and differentiable constraints, not limited to circle packing.",
+    "actions": [
+      "Define the decision variables (positions and common size).",
+      "Encode box constraints and pairwise non‑overlap constraints.",
+      "Seed the optimiser with a feasible layout.",
+      "Run SLSQP for a limited number of iterations.",
+      "Return the final positions and size."
+    ],
+    "cautions": [
+      "Gradient information must be available for all constraints; use smooth approximations if necessary.",
+      "Too many variables or constraints can increase runtime; keep the population small.",
+      "Ensure the initial seed is feasible; otherwise the optimiser may fail to converge."
+    ]
+  },
+  "source_observation": "{\"task\": \"math/circle_packing\", \"best_score\": 0.9256038965387609, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\", \"has_effective_edits\"], \"failure_breakdown\": {\"global_improvement\": 6, \"regression\": 23, \"local_improvement\": 6, \"no_effect\": 4, \"extraction\": 1, \"runtime_error\": 1}}",
+  "task_origin": "math/circle_packing",
+  "generation": 5,
+  "task_tags": [
+    "medium",
+    "dense",
+    "continuous",
+    "monolithic",
+    "few_modes",
+    "none",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_math/circle_packing_5_1"
+  ],
+  "hook_name": "generated_reflection",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "status": "archived"
+}

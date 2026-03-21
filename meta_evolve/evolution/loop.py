@@ -30,6 +30,7 @@ class EvolveResult:
     final_population: Population
     score_trajectory: list[float] = field(default_factory=list)
     step_records: list[dict] = field(default_factory=list)
+    best_eval_details: dict = field(default_factory=dict)
 
 
 def _syntax_check(code: str) -> str | None:
@@ -385,9 +386,11 @@ async def run_inner_loop(
             f"failed={n_failed}"
         )
 
+    best_ind = population.best()
     return EvolveResult(
-        final_best_score=population.best().score if population.best() else float("-inf"),
+        final_best_score=best_ind.score if best_ind else float("-inf"),
         final_population=population,
         score_trajectory=score_trajectory,
         step_records=step_records,
+        best_eval_details=best_ind.eval_details if best_ind else {},
     )

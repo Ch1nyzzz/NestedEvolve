@@ -1,0 +1,15 @@
+# Runtime cache
+cache/
+
+# Transient run results (overwritten each run)
+artifacts/results_*.json
+artifacts/skill_library_shared.json
+artifacts/skill_task_artifacts.json
+
+# Skill archives (per-run snapshots, not needed in repo)
+artifacts/skill_archives/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/

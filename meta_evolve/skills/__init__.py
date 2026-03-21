@@ -12,6 +12,7 @@ from .models import (
     SkillPolarity,
 )
 from .orchestrator import SkillOrchestrator
+from .proposer import SkillProposer
 
 __all__ = [
     "GeneratedSkill",
@@ -24,4 +25,5 @@ __all__ = [
     "SkillMetaLearner",
     "SkillOrchestrator",
     "SkillPolarity",
+    "SkillProposer",
 ]

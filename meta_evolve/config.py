@@ -48,3 +48,9 @@ def shared_skill_artifact_path() -> Path:
 
 def managed_skills_dir() -> Path:
     return PACKAGE_ROOT / "managed_skills"
+
+
+def skill_archives_dir() -> Path:
+    d = ARTIFACTS_DIR / "skill_archives"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

@@ -1,0 +1,49 @@
+{
+  "skill_id": "positive_template_reflection_math/circle_packing_30_6",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Introduce a small‑population evolutionary algorithm with crossover, mutation and force‑directed refinement.",
+  "guidance": {
+    "idea": "Replace a single greedy construction with a population‑based search: initialise diverse candidates, evolve them via genetic operators, and after each generation run a short deterministic force‑based relaxation to enforce feasibility.",
+    "transfer_rule": "Useful for any combinatorial or geometric optimisation where multiple candidate solutions can be evaluated and refined (e.g., packing, scheduling, layout design).",
+    "actions": [
+      "Prompt the LLM to create a population data structure (list of solution objects).",
+      "Ask for implementations of crossover and mutation operators specific to the problem representation.",
+      "Add a post‑generation step that runs a deterministic force‑directed relaxation (e.g., repulsive forces) to clean up overlaps.",
+      "Instruct the LLM to keep the population size modest so the total runtime stays within the budget."
+    ],
+    "cautions": "Population size and number of generations must be limited to respect the 2 s evaluation budget; ensure the relaxation step is vectorised for speed."
+  },
+  "source_observation": "{\"task\": \"math/circle_packing\", \"best_score\": 0.9968711362153535, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\", \"has_effective_edits\"], \"failure_breakdown\": {\"regression\": 105, \"global_improvement\": 7, \"local_improvement\": 31, \"no_effect\": 82, \"extraction\": 15, \"runtime_error\": 15}}",
+  "task_origin": "math/circle_packing",
+  "generation": 30,
+  "task_tags": [
+    "medium",
+    "dense",
+    "continuous",
+    "monolithic",
+    "few_modes",
+    "none",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_math/circle_packing_6_1"
+  ],
+  "hook_name": "generated_reflection",
+  "hook_mode": "always",
+  "hook_file": "hook.py",
+  "hook_entrypoint": "run",
+  "status": "archived"
+}

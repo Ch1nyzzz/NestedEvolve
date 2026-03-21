@@ -46,6 +46,7 @@ def materialize_skill(skill: GeneratedSkill) -> GeneratedSkill:
         "hook_file": hook_file,
         "hook_entrypoint": hook_entrypoint,
         "protected": skill.protected,
+        "status": "starter" if skill.protected else "temporary",
     }
     (skill_dir / "skill.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False))
     (skill_dir / "SKILL.md").write_text(_render_skill_doc(skill))

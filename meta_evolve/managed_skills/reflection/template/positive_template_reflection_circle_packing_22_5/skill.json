@@ -1,0 +1,52 @@
+{
+  "skill_id": "positive_template_reflection_circle_packing_22_5",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Formulate the packing problem as a convex second‑order cone programme (SOCP) and solve it with CVXPY, removing the need for handcrafted row patterns.",
+  "guidance": {
+    "idea": "Replace the existing linear‑program sweep with a single SOCP that jointly optimises all centres and radii under non‑overlap and boundary constraints.",
+    "transfer_rule": "N/A (template for geometric packing / layout optimisation tasks).",
+    "actions": [
+      "Add `import cvxpy as cp`.",
+      "Define variables `c = cp.Variable((N,2))` and `r = cp.Variable(N)`.",
+      "Add constraints `cp.norm(c[i]-c[j]) >= r[i]+r[j]` for all i<j and `0 <= c[i] - r[i]; c[i] + r[i] <= 1`.",
+      "Set objective `cp.Maximize(cp.sum(r))` and solve with an open‑source SOCP solver (ECOS or SCS).",
+      "Replace the old LP call with this new block and return the optimal radii."
+    ],
+    "cautions": [
+      "SOCP solvers may be slower for large N; keep N modest (e.g., ≤30).",
+      "Check solver status; fall back to the previous LP if the problem is infeasible."
+    ]
+  },
+  "source_observation": "{\"task\": \"circle_packing\", \"best_score\": 0.996289030473469, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"has_effective_edits\"], \"failure_breakdown\": {\"regression\": 69, \"global_improvement\": 25, \"local_improvement\": 55, \"no_change\": 1, \"no_effect\": 15, \"extraction\": 9, \"runtime_error\": 9, \"timeout\": 4}}",
+  "task_origin": "circle_packing",
+  "generation": 22,
+  "task_tags": [
+    "fast",
+    "dense",
+    "continuous",
+    "monolithic",
+    "highly_multimodal",
+    "hard",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_circle_packing_22_4"
+  ],
+  "hook_name": null,
+  "hook_mode": null,
+  "hook_file": null,
+  "hook_entrypoint": null,
+  "status": "archived"
+}

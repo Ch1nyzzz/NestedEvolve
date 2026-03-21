@@ -19,6 +19,7 @@ from .filesystem import (
 )
 from .generator import SkillGenerator
 from .library import SkillLibrary
+from .proposer import SkillProposer
 from .materializer import materialize_skill
 from .models import GeneratedSkill, SkillAxis, SkillLevel
 from .trajectory import OrchestratedResult, RunTrajectory, SegmentResult, SelectionEvent
@@ -46,9 +47,11 @@ class SkillOrchestrator:
         adapter,
         llm=None,
         config: dict | None = None,
+        fresh: bool = False,
     ):
         self.library = library
         self.generator = generator
+        self.proposer = SkillProposer(llm or generator.llm)
         self.profile = task_profile
         self.adapter = adapter
         self.llm = llm or generator.llm
@@ -74,7 +77,9 @@ class SkillOrchestrator:
         )
         self._last_generation_iter = -999
         self._active_search_policy: dict[str, Any] = {}
-        self._managed_skills, self._skill_hooks = load_managed_skills()
+        self._managed_skills, self._skill_hooks = load_managed_skills(
+            include_archived=not fresh,
+        )
         # 试用期制 re-selection
         self.selection_trial_iters = max(
             1, int(orchestrator_cfg.get("selection_trial_iters", 3))
@@ -238,6 +243,11 @@ class SkillOrchestrator:
             )
 
             improvement = iter_result.best_score - prev_best
+            outcome_type = (
+                "effective" if improvement > 1e-6
+                else "regressive" if improvement < -1e-6
+                else "neutral"
+            )
             phase = obs["diagnostic_packet"].get("phase", "early")
             co_active = len(active_skills) + len(active_anti_skills)
             for skill in active_skills + active_anti_skills:
@@ -249,6 +259,7 @@ class SkillOrchestrator:
                     stagnation=stagnation,
                     error_rate=obs.get("error_rate", 0.0),
                     co_active_count=co_active,
+                    outcome_type=outcome_type,
                 )
 
             for rec in iter_result.trajectory:
@@ -312,14 +323,15 @@ class SkillOrchestrator:
 
         selected_ids: list[str] = []
         generate_axes: list[str] = []
+        edit_target_id: str | None = None
         if catalog or allow_generation:
-            selected_ids, generate_axes = await self._llm_select(
+            selected_ids, generate_axes, edit_target_id = await self._llm_select(
                 catalog,
                 obs,
                 allow_generation=allow_generation,
                 force_generation=force_generation,
             )
-        if force_generation and not generate_axes:
+        if force_generation and not generate_axes and not edit_target_id:
             axis = self._infer_generation_axis(obs)
             generate_axes = [axis]
             print(
@@ -345,6 +357,22 @@ class SkillOrchestrator:
         )
         generated: list[GeneratedSkill] = []
         generated_anti: list[GeneratedSkill] = []
+
+        # 处理 edit（优先于 generate）
+        if edit_target_id and edit_target_id in self.library.skills:
+            target_skill = self.library.skills[edit_target_id]
+            print(f"    [skill-edit] LLM chose to edit: {edit_target_id}")
+            obs["_edit_target"] = target_skill
+            edit_proposal = await self.proposer.propose(target_skill.axis, target_skill.level, obs)
+            edited = await self.generator.edit(target_skill, obs, task_name, generation,
+                                               proposal=edit_proposal)
+            if edited:
+                self._register_generated_skill(edited)
+                active.append(edited)
+                generated.append(edited)
+                print(f"    [skill-edit] created edited skill: {edited.skill_id}")
+            # edit 和 generate 互斥，edit 优先
+            generate_axes = []
 
         if allow_generation:
             generate_axes = generate_axes[: self.max_generate_per_window]
@@ -485,9 +513,9 @@ class SkillOrchestrator:
         - task/template 级 skill 必须从 general 衍生
         - 如果该 axis 没有 general skill，先生成 general 再衍生 template
         - 如果已有 general，直接衍生 template
-        """
-        diag = obs.get("diagnostic_packet", {})
 
+        流程：proposer.propose() → proposer.brainstorm() → generator（容错回退）
+        """
         # 查该 axis 已有的 general skills
         general_refs = self.library.retrieve(
             axis=axis,
@@ -498,7 +526,10 @@ class SkillOrchestrator:
         # 没有 general → 先生成 general
         if not general_refs:
             print(f"    [skill-gen] no general skill for axis={axis.value}, generating general first")
-            general = await self.generator.distill_general(axis, obs, task_name, generation)
+            proposal = await self.proposer.propose(axis, SkillLevel.GENERAL, obs)
+            brainstorm = await self.proposer.brainstorm(axis, SkillLevel.GENERAL, obs, proposal) if proposal else None
+            general = await self.generator.distill_general(axis, obs, task_name, generation,
+                                                           proposal=proposal, brainstorm=brainstorm)
             if general:
                 self._register_generated_skill(general)
                 general_refs = [general]
@@ -509,6 +540,8 @@ class SkillOrchestrator:
 
         # 从 general 衍生 template（贴合当前 task）
         print(f"    [skill-gen] deriving template from general: {[s.skill_id for s in general_refs]}")
+        proposal = await self.proposer.propose(axis, SkillLevel.TEMPLATE, obs)
+        brainstorm = await self.proposer.brainstorm(axis, SkillLevel.TEMPLATE, obs, proposal) if proposal else None
         template = await self.generator.compile_template(
             axis,
             obs,
@@ -516,6 +549,8 @@ class SkillOrchestrator:
             generation,
             source_skill_ids=[s.skill_id for s in general_refs],
             source_skills=general_refs,
+            proposal=proposal,
+            brainstorm=brainstorm,
         )
         return template
 
@@ -625,17 +660,19 @@ class SkillOrchestrator:
         obs: dict,
         allow_generation: bool,
         force_generation: bool = False,
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], str | None]:
         if catalog:
-            catalog_text = "\n".join(
-                f"  [{i+1}] {item['skill_id']} ({item['level']}/{item['axis']}): {item['description']}"
-                + (
-                    f" [avg_improvement={item['avg_improvement']:.4f}, activations={item['activations']}]"
-                    if item["activations"] > 0
-                    else ""
-                )
-                for i, item in enumerate(catalog)
-            )
+            lines = []
+            for i, item in enumerate(catalog):
+                line = f"  [{i+1}] {item['skill_id']} ({item['level']}/{item['axis']}): {item['description']}"
+                if item["activations"] > 0:
+                    line += (
+                        f" [avg_imp={item['avg_improvement']:.4f}, "
+                        f"activations={item['activations']}, "
+                        f"outcomes={item.get('outcome_summary', 'n/a')}]"
+                    )
+                lines.append(line)
+            catalog_text = "\n".join(lines)
         else:
             catalog_text = "  [none]"
 
@@ -658,6 +695,17 @@ Only generate when existing skills are clearly insufficient; if evidence is lack
                 "## New Skill Generation\n"
                 "Not in generation window, new skill generation not allowed. Leave generate as empty array."
             )
+
+        # edit 选项（任何时候都可以 edit）
+        generation_block += """
+
+## Edit Existing Skill (alternative to generating new)
+If an existing skill SHOULD have addressed the current failures but didn't,
+you can edit it instead of creating a new one. This avoids skill bloat.
+- Set "edit": "skill_id_to_edit" to indicate which skill to improve
+- Only edit when you can identify a specific gap in the skill's guidance
+- Prefer edit over create when the skill's core idea is sound but its coverage is incomplete
+- Set "edit": null if no edit is needed"""
 
         dyn = obs.get("step_dynamics", {})
         diag = obs.get("diagnostic_packet", {})
@@ -693,7 +741,7 @@ Only generate when existing skills are clearly insufficient; if evidence is lack
 {generation_block}
 
 Select 0-{self.max_active_skills} most suitable skills, output JSON:
-{{"select": ["skill_id_1", "skill_id_2"], "generate": ["axis_if_needed"], "reason": "brief reason"}}"""
+{{"select": ["skill_id_1", "skill_id_2"], "generate": ["axis_if_needed"], "edit": "skill_id_to_edit_or_null", "reason": "brief reason"}}"""
 
         try:
             response = await self.llm.generate(
@@ -702,19 +750,19 @@ Select 0-{self.max_active_skills} most suitable skills, output JSON:
                 temperature=0.2,
                 max_tokens=4096,
             )
-            selected, generate = self._parse_selection(
+            selected, generate, edit_id = self._parse_selection(
                 response, {item["skill_id"] for item in catalog}
             )
             print(
                 f"    [skill-select] iter={obs.get('total_iters_completed',0)} "
-                f"allow_gen={allow_generation} selected={selected} generate={generate} raw={response[:200]}"
+                f"allow_gen={allow_generation} selected={selected} generate={generate} edit={edit_id} raw={response[:200]}"
             )
-            if not selected and not generate and catalog:
-                selected, generate = self._heuristic_select(catalog, allow_generation)
+            if not selected and not generate and not edit_id and catalog:
+                selected, generate, edit_id = self._heuristic_select(catalog, allow_generation)
                 print(
                     f"    [skill-select] heuristic fallback: selected={selected} generate={generate}"
                 )
-            return selected, generate
+            return selected, generate, edit_id
         except Exception as e:
             print(
                 f"    [skill-select] step={obs.get('total_iters_completed',0)} EXCEPTION: {e}"
@@ -725,14 +773,14 @@ Select 0-{self.max_active_skills} most suitable skills, output JSON:
     def _parse_selection(
         response: str,
         valid_ids: set[str],
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], str | None]:
         m = re.search(r"\{[\s\S]*\}", response)
         if not m:
-            return [], []
+            return [], [], None
         try:
             data = json.loads(m.group())
         except json.JSONDecodeError:
-            return [], []
+            return [], [], None
 
         selected = [sid for sid in data.get("select", []) if sid in valid_ids]
         generate = [
@@ -740,13 +788,18 @@ Select 0-{self.max_active_skills} most suitable skills, output JSON:
             for a in data.get("generate", [])
             if a in ("reflection", "diagnosis", "strategy")
         ][:1]
-        return selected, generate
+        edit_id = data.get("edit")
+        if isinstance(edit_id, str) and edit_id in valid_ids:
+            pass  # valid edit target
+        else:
+            edit_id = None
+        return selected, generate, edit_id
 
     @staticmethod
     def _heuristic_select(
         catalog: list[dict],
         allow_generation: bool,
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], str | None]:
         by_score = sorted(
             catalog,
             key=lambda c: (
@@ -757,10 +810,10 @@ Select 0-{self.max_active_skills} most suitable skills, output JSON:
             reverse=True,
         )
         if by_score:
-            return [by_score[0]["skill_id"]], []
+            return [by_score[0]["skill_id"]], [], None
         if allow_generation:
-            return [], ["strategy"]
-        return [], []
+            return [], ["strategy"], None
+        return [], [], None
 
 
 def _merge_guidance(
@@ -871,7 +924,7 @@ def _build_observation(
     if population and hasattr(population, "best"):
         best_ind = population.best()
         if best_ind:
-            best_code = best_ind.code[:500]
+            best_code = best_ind.code
 
     step_dynamics = _compute_step_dynamics(trajectory, best_score)
     diagnostic_packet = _build_diagnostic_packet(

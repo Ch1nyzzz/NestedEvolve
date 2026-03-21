@@ -159,6 +159,33 @@ _NEGATIVE_SCHEMA = """{
 # System prompts
 # ============================================================
 
+# ============================================================
+# Abstraction ladder per skill level
+# ============================================================
+
+_ABSTRACTION_LADDER: dict[SkillLevel, tuple[str, str]] = {
+    SkillLevel.GENERAL: (
+        "principle-level",
+        "Cross-task transferable thinking principles. "
+        "Example: 'Choose statistical methods appropriate for your sample type and inference goals'. "
+        "Do NOT mention specific libraries, functions, or parameters. "
+        "The skill must apply to 10+ different tasks.",
+    ),
+    SkillLevel.TEMPLATE: (
+        "method-level",
+        "Specific approaches for this type of problem. "
+        "Example: 'Use sample standard deviation (n-1) for inferential statistics'. "
+        "Name concrete methods/algorithms but NOT exact code or library calls.",
+    ),
+    SkillLevel.EPHEMERAL: (
+        "action-level",
+        "Concrete executable instructions for the current state. "
+        "Example: 'Use np.std(data, ddof=1) with the current dataset'. "
+        "Include exact function calls, parameters, and code-level details.",
+    ),
+}
+
+
 _SYSTEM_POSITIVE = (
     "You are an expert algorithm researcher and optimization strategist. "
     "Think carefully and deeply. "
@@ -197,6 +224,8 @@ class SkillGenerator:
         level: SkillLevel | None = None,
         source_skill_ids: list[str] | None = None,
         max_retries: int = 3,
+        proposal: dict | None = None,
+        brainstorm: dict | None = None,
     ) -> GeneratedSkill | None:
         """生成正向 skill。失败重试，不 fallback。"""
         skill_level = level or self._infer_level(observation)
@@ -206,6 +235,8 @@ class SkillGenerator:
                 axis=axis,
                 level=skill_level,
                 observation=observation,
+                proposal=proposal,
+                brainstorm=brainstorm,
             )
             if guidance is not None:
                 break
@@ -259,12 +290,55 @@ class SkillGenerator:
             source_skill_ids=source_skill_ids or [],
         )
 
-    async def distill_general(self, axis, obs, task_name, generation):
-        return await self.generate(axis, obs, task_name, generation, level=SkillLevel.GENERAL)
+    async def edit(
+        self,
+        target_skill: GeneratedSkill,
+        observation: dict[str, Any],
+        task_name: str,
+        generation: int,
+        max_retries: int = 3,
+        proposal: dict | None = None,
+    ) -> GeneratedSkill | None:
+        """编辑已有 skill，生成改进版本。"""
+        observation = dict(observation)
+        observation["_edit_target"] = target_skill
+        guidance = None
+        for attempt in range(max_retries):
+            guidance = await self._generate_guidance(
+                axis=target_skill.axis,
+                level=target_skill.level,
+                observation=observation,
+                proposal=proposal,
+            )
+            if guidance is not None:
+                break
+            print(f"    [skill-edit] attempt {attempt+1}/{max_retries} failed, retrying...")
+        if guidance is None:
+            print(f"    [skill-edit] all {max_retries} attempts failed, skipping")
+            return None
+        edited = self._build_skill(
+            axis=target_skill.axis,
+            level=target_skill.level,
+            polarity=SkillPolarity.POSITIVE,
+            guidance=guidance,
+            observation=observation,
+            task_name=task_name,
+            generation=generation,
+            source_skill_ids=[target_skill.skill_id],
+        )
+        edited.parent_skill_id = target_skill.skill_id
+        edited.edit_generation = target_skill.edit_generation + 1
+        return edited
+
+    async def distill_general(self, axis, obs, task_name, generation,
+                              proposal=None, brainstorm=None):
+        return await self.generate(axis, obs, task_name, generation,
+                                   level=SkillLevel.GENERAL, proposal=proposal, brainstorm=brainstorm)
 
     async def compile_template(
         self, axis, obs, task_name, generation,
         source_skill_ids=None, source_skills=None,
+        proposal=None, brainstorm=None,
     ):
         if source_skills:
             obs = dict(obs)
@@ -275,10 +349,14 @@ class SkillGenerator:
         return await self.generate(
             axis, obs, task_name, generation,
             level=SkillLevel.TEMPLATE, source_skill_ids=source_skill_ids,
+            proposal=proposal, brainstorm=brainstorm,
         )
 
-    async def instantiate_ephemeral(self, axis, obs, task_name, generation, source_skill_ids=None):
-        return await self.generate(axis, obs, task_name, generation, level=SkillLevel.EPHEMERAL, source_skill_ids=source_skill_ids)
+    async def instantiate_ephemeral(self, axis, obs, task_name, generation,
+                                    source_skill_ids=None, proposal=None, brainstorm=None):
+        return await self.generate(axis, obs, task_name, generation,
+                                   level=SkillLevel.EPHEMERAL, source_skill_ids=source_skill_ids,
+                                   proposal=proposal, brainstorm=brainstorm)
 
     # ----------------------------------------------------------
     # Core generation
@@ -290,9 +368,12 @@ class SkillGenerator:
         level: SkillLevel,
         observation: dict[str, Any],
         polarity: SkillPolarity = SkillPolarity.POSITIVE,
+        proposal: dict | None = None,
+        brainstorm: dict | None = None,
     ) -> dict | None:
         system_msg = _SYSTEM_NEGATIVE if polarity == SkillPolarity.NEGATIVE else _SYSTEM_POSITIVE
-        user_msg = self._build_prompt(axis, level, observation, polarity)
+        user_msg = self._build_prompt(axis, level, observation, polarity,
+                                      proposal=proposal, brainstorm=brainstorm)
         try:
             response = await self.llm.generate(
                 system_msg, user_msg, temperature=0.4, max_tokens=8192,
@@ -308,6 +389,8 @@ class SkillGenerator:
         level: SkillLevel,
         obs: dict[str, Any],
         polarity: SkillPolarity,
+        proposal: dict | None = None,
+        brainstorm: dict | None = None,
     ) -> str:
         """参考 AdaEvolve 6 步分析框架构建 prompt。"""
         parts: list[str] = []
@@ -315,8 +398,9 @@ class SkillGenerator:
 
         # === 1. Evaluator code (help LLM understand "what is good") ===
         if sys_desc and sys_desc.evaluator_source:
+            eval_src = sys_desc.evaluator_source if len(sys_desc.evaluator_source) < 15000 else sys_desc.evaluator_source[:15000]
             parts.append("## Step 1: Evaluator Code (understand scoring mechanism)")
-            parts.append(f"```python\n{sys_desc.evaluator_source[:3000]}\n```")
+            parts.append(f"```python\n{eval_src}\n```")
 
         # === 2. 当前最优程序 ===
         best_code = obs.get("best_code_snippet", "")
@@ -326,8 +410,19 @@ class SkillGenerator:
             parts.append(f"\n## Step 2: Current Best Program (score: {best_score:.6f}, baseline: {baseline:.6f})")
             parts.append(f"```python\n{best_code}\n```")
 
-        # === 3. Analyze current program (enforce structured thinking) ===
-        parts.append("""
+        # === 3. Analysis (proposer or self-analysis) ===
+        if proposal:
+            parts.append(f"""
+## Step 3: Proposer Analysis (pre-analyzed — use this as your foundation)
+
+**Core Problem**: {proposal.get('problem_analysis', 'N/A')}
+**Why Previous Skills Failed**: {proposal.get('why_previous_failed', 'N/A')}
+**Proposed Direction**: {proposal.get('proposed_approach', 'N/A')}
+**Constraints**: {json.dumps(proposal.get('key_constraints', []), ensure_ascii=False)}
+
+Build your skill based on this analysis. Do NOT re-analyze from scratch.""")
+        else:
+            parts.append("""
 ## Step 3: Analysis Framework (must complete before generating skill)
 
 **A. Analyze the Evaluator**
@@ -405,6 +500,71 @@ class SkillGenerator:
                     f"  [{eff}] {h.get('summary', '')[:150]}"
                 )
 
+        # === Edit target (如果是编辑模式) ===
+        edit_target = obs.get("_edit_target")
+        if edit_target is not None:
+            ev = edit_target.evidence
+            idea = edit_target.guidance.get("idea") or edit_target.guidance.get("principle") or ""
+            parts.append(f"""
+## Edit Target Skill (MODIFY, do not create from scratch)
+
+### What this skill does
+- ID: {edit_target.skill_id}
+- Axis: {edit_target.axis.value}, Level: {edit_target.level.value}
+- Original idea: {idea}
+- Current guidance: {json.dumps(edit_target.guidance, indent=2, ensure_ascii=False)}
+
+### Performance analysis
+- Activations: {ev.activations}, Avg improvement: {ev.avg_improvement:.6f}
+- Success rate: {ev.success_rate:.0%}
+- Outcome history: {ev.outcome_types[-8:]}
+- Matched phases: {ev.matched_phases[-5:]}
+
+### Edit instructions
+1. Analyze WHY this skill failed in recent activations — is the idea wrong, or is the guidance incomplete?
+2. Identify what to PRESERVE (parts that contributed to effective outcomes)
+3. Identify what to FIX or EXTEND (gaps that caused neutral/regressive outcomes)
+4. Output the COMPLETE updated guidance JSON (same schema as the original)""")
+
+        # === Brainstorm (pre-analyzed or inline) ===
+        if brainstorm and brainstorm.get("approaches"):
+            approaches_text = []
+            for i, a in enumerate(brainstorm["approaches"]):
+                label = chr(65 + i)  # A, B, C
+                approaches_text.append(
+                    f"**Approach {label} ({a.get('name', '?')})**: {a.get('idea', '')}\n"
+                    f"  Pros: {a.get('pros', '')} | Cons: {a.get('cons', '')}"
+                )
+            parts.append(f"""
+## Brainstorm Result (pre-analyzed — implement the SELECTED approach)
+
+{chr(10).join(approaches_text)}
+
+**Selected**: {brainstorm.get('selected', '?')} — {brainstorm.get('selection_reason', '')}
+
+Generate the skill for the SELECTED approach only.""")
+        else:
+            parts.append("""
+## Brainstorm (MANDATORY before generating)
+
+Before committing to a single skill, brainstorm 2-3 alternative approaches:
+
+**Approach A**: [core idea] — Pros: ... Cons: ...
+**Approach B**: [core idea] — Pros: ... Cons: ...
+**Approach C** (optional): [core idea] — Pros: ...
+
+Then select the BEST approach and explain why in 1 sentence.
+Only generate the skill for the selected approach.""")
+
+        # === Abstraction level constraint ===
+        if polarity != SkillPolarity.NEGATIVE:
+            abs_name, abs_desc = _ABSTRACTION_LADDER[level]
+            parts.append(f"""
+## Abstraction Level Constraint: {abs_name}
+Your skill MUST target the **{abs_name}** abstraction:
+{abs_desc}
+Skills that violate this abstraction level will be rejected.""")
+
         # === 7. 生成指令 + output schema ===
         schema = _NEGATIVE_SCHEMA if polarity == SkillPolarity.NEGATIVE else _POSITIVE_SCHEMAS.get(
             (axis, level), _POSITIVE_SCHEMAS[(SkillAxis.STRATEGY, SkillLevel.TEMPLATE)]
@@ -426,7 +586,19 @@ The function must return a dict with at least:
 - guidance: dict of dynamic guidance to inject into the evolver prompt
 
 Write real, dynamic Python logic that inspects obs to compute guidance — do NOT just return static strings.
-Read the obs fields to adapt behavior to the current evolution state (stagnation level, error rate, phase, etc.)."""
+Read the obs fields to adapt behavior to the current evolution state (stagnation level, error rate, phase, etc.).
+
+**Rich context access**: The hook runs as real Python with full access to task sources:
+- `context['task'].evaluator_source` — full evaluator source code (understand scoring logic deeply)
+- `context['task'].full_initial_code` — complete initial program (understand starting point)
+- `context['task'].initial_code` — mutable EVOLVE-BLOCK code
+- `context['task'].system_prompt` — task system prompt
+- `context['sys_desc'].evaluator_contract` — extracted reward/penalty/constraint keywords
+- `context['sys_desc'].profile` — 8-dimension task profile (eval_cost, signal_density, search_space, etc.)
+- Standard Python imports: pathlib, json, re, math, numpy, collections, etc.
+- `context['llm']` — can call `await llm.generate(system, user, temperature=..., max_tokens=...)` for deep analysis
+
+Write hooks that READ these sources dynamically for deeper analysis rather than relying solely on obs dict summaries."""
             if axis == SkillAxis.STRATEGY:
                 hook_guide += """
 

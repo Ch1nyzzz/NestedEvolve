@@ -1,0 +1,225 @@
+{
+  "task": "math/circle_packing",
+  "baseline": 0.36423689449571406,
+  "final_best": 0.9968711362153535,
+  "improvement": 0.6326342417196394,
+  "skills_used": [
+    "positive_general_reflection_math/circle_packing_6_1",
+    "positive_template_reflection_math/circle_packing_30_6",
+    "positive_template_reflection_math/circle_packing_35_8",
+    "positive_template_reflection_math/circle_packing_45_10",
+    "positive_template_reflection_math/circle_packing_6_2",
+    "search_diverse_restart",
+    "search_error_guided_repair",
+    "search_ucb_exploration",
+    "system_starter_target_analysis"
+  ],
+  "n_skills_generated": 14,
+  "elapsed_sec": 5536.986789941788,
+  "trajectory": "Task: math/circle_packing\nTotal improvement: 0.632634\nSkills used: positive_general_reflection_math/circle_packing_6_1, positive_template_reflection_math/circle_packing_30_6, positive_template_reflection_math/circle_packing_35_8, positive_template_reflection_math/circle_packing_45_10, positive_template_reflection_math/circle_packing_6_2, search_diverse_restart, search_error_guided_repair, search_ucb_exploration, system_starter_target_analysis\nAnti-skills used: negative_ephemeral_reflection_math/circle_packing_30_7, negative_ephemeral_reflection_math/circle_packing_35_9, negative_ephemeral_reflection_math/circle_packing_45_11, negative_ephemeral_reflection_math/circle_packing_6_3\n  Segment 0: 0.3642 → 0.9969 (Δ=0.6326, skills=[positive_general_reflection_math/circle_packing_6_1, positive_template_reflection_math/circle_packing_30_6, positive_template_reflection_math/circle_packing_35_8, positive_template_reflection_math/circle_packing_45_10, positive_template_reflection_math/circle_packing_6_2, search_diverse_restart, search_error_guided_repair, search_ucb_exploration, system_starter_target_analysis], anti=[negative_ephemeral_reflection_math/circle_packing_30_7, negative_ephemeral_reflection_math/circle_packing_35_9, negative_ephemeral_reflection_math/circle_packing_45_11, negative_ephemeral_reflection_math/circle_packing_6_3])\n    selections: iter 47 (batch=8): skills=positive_template_reflection_math/circle_packing_45_10 anti=negative_ephemeral_reflection_math/circle_packing_35_9,negative_ephemeral_reflection_math/circle_packing_30_7; iter 48 (batch=8): skills=positive_template_reflection_math/circle_packing_45_10 anti=negative_ephemeral_reflection_math/circle_packing_35_9,negative_ephemeral_reflection_math/circle_packing_30_7; iter 49 (batch=8): skills=search_diverse_restart,search_error_guided_repair,search_ucb_exploration anti=negative_ephemeral_reflection_math/circle_packing_45_11,negative_ephemeral_reflection_math/circle_packing_35_9\n    step 55: score=0.9473 Δ=0.0000 skills=[search_diverse_restart, search_error_guided_repair, search_ucb_exploration] anti=[negative_ephemeral_reflection_math/circle_packing_45_11, negative_ephemeral_reflection_math/circle_packing_35_9] outcome=regression\n    step 56: score=0.0000 Δ=0.0000 skills=[search_diverse_restart, search_error_guided_repair, search_ucb_exploration] anti=[negative_ephemeral_reflection_math/circle_packing_45_11, negative_ephemeral_reflection_math/circle_packing_35_9] outcome=regression\n    step 57: score=0.9611 Δ=0.0000 skills=[search_diverse_restart, search_error_guided_repair, search_ucb_exploration] anti=[negative_ephemeral_reflection_math/circle_packing_45_11, negative_ephemeral_reflection_math/circle_packing_35_9] outcome=regression",
+  "evidence": {
+    "positive:diagnosis:general": [
+      {
+        "id": "system_starter_target_analysis",
+        "task": "global",
+        "task_tags": [],
+        "activations": 9,
+        "avg_improvement": 0.06237411133823011,
+        "success_rate": 0.1111111111111111
+      }
+    ],
+    "positive:strategy:general": [
+      {
+        "id": "search_diverse_restart",
+        "task": "global",
+        "task_tags": [],
+        "activations": 45,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "search_elite_exploitation",
+        "task": "global",
+        "task_tags": [],
+        "activations": 0,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "search_error_guided_repair",
+        "task": "global",
+        "task_tags": [],
+        "activations": 38,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "search_ucb_exploration",
+        "task": "global",
+        "task_tags": [],
+        "activations": 17,
+        "avg_improvement": 0.0016941245347699664,
+        "success_rate": 0.11764705882352941
+      }
+    ],
+    "positive:reflection:general": [
+      {
+        "id": "positive_general_reflection_math/circle_packing_6_1",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 2,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      }
+    ],
+    "positive:reflection:template": [
+      {
+        "id": "positive_template_reflection_math/circle_packing_6_2",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 12,
+        "avg_improvement": 0.005640588705928169,
+        "success_rate": 0.16666666666666666
+      },
+      {
+        "id": "positive_template_reflection_math/circle_packing_30_6",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 4,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_math/circle_packing_35_8",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 7,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "positive_template_reflection_math/circle_packing_45_10",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 4,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      }
+    ],
+    "negative:reflection:ephemeral": [
+      {
+        "id": "negative_ephemeral_reflection_math/circle_packing_6_3",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 33,
+        "avg_improvement": 0.00017900876022414747,
+        "success_rate": 0.05
+      },
+      {
+        "id": "negative_ephemeral_reflection_math/circle_packing_30_7",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 19,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "negative_ephemeral_reflection_math/circle_packing_35_9",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 11,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      },
+      {
+        "id": "negative_ephemeral_reflection_math/circle_packing_45_11",
+        "task": "math/circle_packing",
+        "task_tags": [
+          "medium",
+          "dense",
+          "continuous",
+          "monolithic",
+          "few_modes",
+          "none",
+          "maximize",
+          "medium"
+        ],
+        "activations": 1,
+        "avg_improvement": 0.0,
+        "success_rate": 0.0
+      }
+    ]
+  }
+}

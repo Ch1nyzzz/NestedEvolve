@@ -51,7 +51,8 @@ class SystemDescription:
         if self.evaluator_source:
             lines.append("")
             lines.append("**Scoring Function Preview**:")
-            lines.append(f"```python\n{self.evaluator_source[:6000]}\n```")
+            src = self.evaluator_source if len(self.evaluator_source) < 15000 else self.evaluator_source[:15000]
+            lines.append(f"```python\n{src}\n```")
         return "\n".join(lines)
 
 

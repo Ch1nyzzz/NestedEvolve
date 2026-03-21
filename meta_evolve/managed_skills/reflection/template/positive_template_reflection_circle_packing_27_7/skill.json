@@ -1,0 +1,52 @@
+{
+  "skill_id": "positive_template_reflection_circle_packing_27_7",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Use a physics‑inspired gradient‑descent optimiser (e.g., Adam) with barrier penalties to jointly refine centres and radii.",
+  "guidance": {
+    "idea": "Replace the static row‑pattern + LP pipeline with a continuous optimisation that treats all (x, y, r) as free variables and penalises overlaps and wall violations.",
+    "transfer_rule": "N/A (template for problems where a smooth penalty can be defined).",
+    "actions": [
+      "Add `import torch` and set up tensors for centres and radii with `requires_grad=True`.",
+      "Define a loss = –sum(r) + λ·overlap_penalty + λ·boundary_penalty, where penalties use smooth ReLU‑like functions.",
+      "Instantiate an Adam optimiser (`torch.optim.Adam`) and run a fixed number of iterations, projecting radii to be non‑negative after each step.",
+      "After optimisation, optionally run a short LP to fine‑tune radii while keeping centres fixed."
+    ],
+    "cautions": [
+      "Choose λ large enough to keep constraints satisfied but not so large that gradients vanish.",
+      "Monitor for NaNs caused by division by zero in distance calculations."
+    ]
+  },
+  "source_observation": "{\"task\": \"circle_packing\", \"best_score\": 0.996289030473469, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\", \"has_effective_edits\"], \"failure_breakdown\": {\"regression\": 94, \"global_improvement\": 25, \"local_improvement\": 67, \"no_change\": 2, \"no_effect\": 15, \"extraction\": 10, \"runtime_error\": 10, \"timeout\": 6}}",
+  "task_origin": "circle_packing",
+  "generation": 27,
+  "task_tags": [
+    "fast",
+    "dense",
+    "continuous",
+    "monolithic",
+    "highly_multimodal",
+    "hard",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_circle_packing_22_4"
+  ],
+  "hook_name": null,
+  "hook_mode": null,
+  "hook_file": null,
+  "hook_entrypoint": null,
+  "status": "archived"
+}

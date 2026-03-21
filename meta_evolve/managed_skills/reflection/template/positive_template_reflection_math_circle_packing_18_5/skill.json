@@ -1,0 +1,56 @@
+{
+  "skill_id": "positive_template_reflection_math/circle_packing_18_5",
+  "axis": "reflection",
+  "level": "template",
+  "polarity": "positive",
+  "description": "Iteratively apply repulsive forces and uniform radius inflation to jointly optimise centres and radii.",
+  "guidance": {
+    "idea": "Start from a random or low‑discrepancy placement, then repeatedly (1) compute repulsive forces between circles and from walls, (2) move centres a small step along the forces, (3) uniformly increase radii until an overlap is detected, (4) project back into the feasible region.",
+    "transfer_rule": "N/A (template for any packing / layout problem where forces can be defined).",
+    "actions": [
+      "Initialize centres `c_i` randomly in the unit square.",
+      "Loop until convergence:",
+      "  • Compute pairwise vectors `d_ij = c_i - c_j` and distances `||d_ij||`.",
+      "  • For each pair, add a repulsive force proportional to `max(0, r_i+r_j - ||d_ij||)`.",
+      "  • Add wall‑repulsion forces for circles near the boundaries.",
+      "  • Update centres with a small step size `η`.",
+      "  • Increase all radii by a small increment `Δr` and clip to keep circles inside the square.",
+      "  • If any overlap appears, roll back the last radius increment."
+    ],
+    "cautions": [
+      "Step sizes η and Δr must be tuned; too large leads to instability.",
+      "Terminate after a fixed number of iterations or when total radius change < ε."
+    ]
+  },
+  "source_observation": "{\"task\": \"math/circle_packing\", \"best_score\": 0.9644862832020151, \"phase\": \"stalled\", \"diagnostic_tags\": [\"stagnation\", \"runtime_failures\", \"regression\", \"no_effect\", \"has_effective_edits\"], \"failure_breakdown\": {\"global_improvement\": 6, \"regression\": 91, \"local_improvement\": 22, \"extraction\": 3, \"runtime_error\": 3, \"no_effect\": 22}}",
+  "task_origin": "math/circle_packing",
+  "generation": 18,
+  "task_tags": [
+    "medium",
+    "dense",
+    "continuous",
+    "monolithic",
+    "few_modes",
+    "none",
+    "maximize",
+    "medium"
+  ],
+  "applicable_stages": [
+    "stalled"
+  ],
+  "trigger_diagnostics": [
+    "stagnation",
+    "runtime_failures",
+    "regression",
+    "no_effect",
+    "has_effective_edits"
+  ],
+  "source_skill_ids": [
+    "positive_general_reflection_circle_packing_22_4"
+  ],
+  "hook_name": null,
+  "hook_mode": null,
+  "hook_file": null,
+  "hook_entrypoint": null,
+  "status": "archived"
+}
